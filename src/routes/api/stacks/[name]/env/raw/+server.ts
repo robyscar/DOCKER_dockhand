@@ -1,7 +1,7 @@
 import { json } from '@sveltejs/kit';
 import { getStacksDir } from '$lib/server/stacks';
 import { authorize } from '$lib/server/authorize';
-import { existsSync } from 'node:fs';
+import { existsSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import type { RequestHandler } from './$types';
 
@@ -82,9 +82,26 @@ export const PUT: RequestHandler = async ({ params, url, cookies, request }) => 
 			return json({ error: 'Stack directory not found' }, { status: 404 });
 		}
 
-		// Ensure content ends with newline
 		let content = body.content;
-		if (content && !content.endsWith('\n')) {
+
+		// If content is empty, delete the .env file instead of writing empty file
+		if (!content || !content.trim()) {
+			if (existsSync(envFilePath)) {
+				rmSync(envFilePath);
+				return json({ success: true, deleted: true });
+			}
+			return json({ success: true });
+		}
+
+		// Guard against writing masked secret placeholders (would corrupt the file)
+		if (content.match(/^[A-Za-z_][A-Za-z0-9_]*=\*\*\*$/m)) {
+			return json({
+				error: 'Cannot write masked placeholder "***" to .env file - this would corrupt secret values'
+			}, { status: 400 });
+		}
+
+		// Ensure content ends with newline
+		if (!content.endsWith('\n')) {
 			content += '\n';
 		}
 

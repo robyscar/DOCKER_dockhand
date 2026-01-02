@@ -24,6 +24,7 @@
 	import PageHeader from '$lib/components/PageHeader.svelte';
 	import { DataGrid } from '$lib/components/data-grid';
 	import type { DataGridSortState } from '$lib/components/data-grid/types';
+	import { ErrorDialog } from '$lib/components/ui/error-dialog';
 
 	type SortField = 'name' | 'containers' | 'status' | 'cpu' | 'memory';
 	type SortDirection = 'asc' | 'desc';
@@ -281,14 +282,13 @@
 	let confirmPauseContainerId = $state<string | null>(null);
 
 	// Operation error state (for stack and container operations)
-	let operationError = $state<{ id: string; message: string } | null>(null);
-	let errorTimeouts: ReturnType<typeof setTimeout>[] = [];
+	let operationError = $state<{ id: string; title: string; message: string } | null>(null);
 
-	function clearErrorAfterDelay(id: string) {
-		const timeoutId = setTimeout(() => {
-			if (operationError?.id === id) operationError = null;
-		}, 5000);
-		errorTimeouts.push(timeoutId);
+	// Error dialog state (for showing detailed errors)
+	let errorDialogData = $state<{ title: string; message: string } | null>(null);
+
+	function showErrorDialog(title: string, message: string) {
+		errorDialogData = { title, message };
 	}
 
 	// Container inspect modal state
@@ -673,9 +673,7 @@
 			if (!response.ok) {
 				const data = await response.json();
 				const errorMsg = data.error || 'Failed to start stack';
-				operationError = { id: name, message: errorMsg };
-				toast.error(errorMsg);
-				clearErrorAfterDelay(name);
+				showErrorDialog(`Failed to start ${name}`, errorMsg);
 				return;
 			}
 			toast.success(`Started ${name}`);
@@ -683,9 +681,7 @@
 		} catch (error) {
 			console.error('Failed to start stack:', error);
 			const errorMsg = error instanceof Error ? error.message : 'Failed to start stack';
-			operationError = { id: name, message: errorMsg };
-			toast.error(errorMsg);
-			clearErrorAfterDelay(name);
+			showErrorDialog(`Failed to start ${name}`, errorMsg);
 		} finally {
 			stackActionLoading = null;
 		}
@@ -699,9 +695,7 @@
 			if (!response.ok) {
 				const data = await response.json();
 				const errorMsg = data.error || 'Failed to stop stack';
-				operationError = { id: name, message: errorMsg };
-				toast.error(errorMsg);
-				clearErrorAfterDelay(name);
+				showErrorDialog(`Failed to stop ${name}`, errorMsg);
 				return;
 			}
 			toast.success(`Stopped ${name}`);
@@ -709,9 +703,7 @@
 		} catch (error) {
 			console.error('Failed to stop stack:', error);
 			const errorMsg = error instanceof Error ? error.message : 'Failed to stop stack';
-			operationError = { id: name, message: errorMsg };
-			toast.error(errorMsg);
-			clearErrorAfterDelay(name);
+			showErrorDialog(`Failed to stop ${name}`, errorMsg);
 		} finally {
 			stackActionLoading = null;
 		}
@@ -725,9 +717,7 @@
 			if (!response.ok) {
 				const data = await response.json();
 				const errorMsg = data.error || 'Failed to restart stack';
-				operationError = { id: name, message: errorMsg };
-				toast.error(errorMsg);
-				clearErrorAfterDelay(name);
+				showErrorDialog(`Failed to restart ${name}`, errorMsg);
 				return;
 			}
 			toast.success(`Restarted ${name}`);
@@ -735,9 +725,7 @@
 		} catch (error) {
 			console.error('Failed to restart stack:', error);
 			const errorMsg = error instanceof Error ? error.message : 'Failed to restart stack';
-			operationError = { id: name, message: errorMsg };
-			toast.error(errorMsg);
-			clearErrorAfterDelay(name);
+			showErrorDialog(`Failed to restart ${name}`, errorMsg);
 		} finally {
 			stackActionLoading = null;
 		}
@@ -751,9 +739,7 @@
 			if (!response.ok) {
 				const data = await response.json();
 				const errorMsg = data.error || 'Failed to bring down stack';
-				operationError = { id: name, message: errorMsg };
-				toast.error(errorMsg);
-				clearErrorAfterDelay(name);
+				showErrorDialog(`Failed to bring down ${name}`, errorMsg);
 				return;
 			}
 			toast.success(`Brought down ${name}`);
@@ -761,9 +747,7 @@
 		} catch (error) {
 			console.error('Failed to bring down stack:', error);
 			const errorMsg = error instanceof Error ? error.message : 'Failed to bring down stack';
-			operationError = { id: name, message: errorMsg };
-			toast.error(errorMsg);
-			clearErrorAfterDelay(name);
+			showErrorDialog(`Failed to bring down ${name}`, errorMsg);
 		} finally {
 			stackActionLoading = null;
 		}
@@ -789,9 +773,7 @@
 			if (!response.ok) {
 				const data = await response.json();
 				const errorMsg = data.error || 'Failed to remove stack';
-				operationError = { id: name, message: errorMsg };
-				toast.error(errorMsg);
-				clearErrorAfterDelay(name);
+				showErrorDialog(`Failed to remove ${name}`, errorMsg);
 				return;
 			}
 			toast.success(`Removed ${name}`);
@@ -799,9 +781,7 @@
 		} catch (error) {
 			console.error('Failed to remove stack:', error);
 			const errorMsg = error instanceof Error ? error.message : 'Failed to remove stack';
-			operationError = { id: name, message: errorMsg };
-			toast.error(errorMsg);
-			clearErrorAfterDelay(name);
+			showErrorDialog(`Failed to remove ${name}`, errorMsg);
 		}
 	}
 
@@ -1970,3 +1950,12 @@
 	onClose={() => showBatchOpModal = false}
 	onComplete={handleBatchComplete}
 />
+
+{#if errorDialogData}
+	<ErrorDialog
+		open={true}
+		title={errorDialogData.title}
+		message={errorDialogData.message}
+		onClose={() => errorDialogData = null}
+	/>
+{/if}

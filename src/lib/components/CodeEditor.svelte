@@ -2,6 +2,8 @@
 	import { onMount, onDestroy } from 'svelte';
 	import { EditorState, StateField, StateEffect, RangeSet } from '@codemirror/state';
 	import { EditorView, keymap, lineNumbers, highlightActiveLine, highlightActiveLineGutter, gutter, GutterMarker, Decoration, WidgetType, type DecorationSet } from '@codemirror/view';
+	// Note: Secret masking was removed - secrets are now excluded from the raw editor entirely
+	// and are only stored in the database (never written to .env file)
 	import { defaultKeymap, history, historyKeymap, indentWithTab } from '@codemirror/commands';
 	import { syntaxHighlighting, defaultHighlightStyle, indentOnInput, bracketMatching, StreamLanguage, type StreamParser } from '@codemirror/language';
 	import { searchKeymap, highlightSelectionMatches } from '@codemirror/search';
@@ -785,6 +787,21 @@
 		const markers = variableMarkers;
 		if (view && markers) {
 			updateVariableMarkers(markers);
+		}
+	});
+
+	// Sync external value changes to the editor (e.g., when parent clears the content)
+	$effect(() => {
+		const externalValue = value;
+		if (view) {
+			const currentContent = view.state.doc.toString();
+			// Only update if the external value differs from editor content
+			// This prevents feedback loops from editor changes
+			if (externalValue !== currentContent) {
+				view.dispatch({
+					changes: { from: 0, to: currentContent.length, insert: externalValue }
+				});
+			}
 		}
 	});
 </script>

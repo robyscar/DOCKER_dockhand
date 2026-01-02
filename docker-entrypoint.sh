@@ -80,7 +80,7 @@ else
     if [ "$PUID" != "1001" ] || [ "$PGID" != "1001" ]; then
         echo "Configuring user with PUID=$PUID PGID=$PGID"
 
-        # Remove existing dockhand user/group (only dockhand, not others)
+        # Remove existing dockhand user/group (using busybox commands)
         deluser dockhand 2>/dev/null || true
         delgroup dockhand 2>/dev/null || true
 

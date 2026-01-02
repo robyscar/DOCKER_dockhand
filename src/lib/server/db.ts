@@ -4065,6 +4065,39 @@ export async function getStackEnvVarsAsRecord(
 }
 
 /**
+ * Get only SECRET environment variables as a key-value record (for shell injection).
+ * Returns unmasked real values - used to inject secrets via shell environment at runtime.
+ * These secrets are NEVER written to .env files on disk.
+ * @param stackName - Name of the stack
+ * @param environmentId - Optional environment ID
+ */
+export async function getSecretEnvVarsAsRecord(
+	stackName: string,
+	environmentId?: number | null
+): Promise<Record<string, string>> {
+	const vars = await getStackEnvVars(stackName, environmentId, false);
+	return Object.fromEntries(
+		vars.filter(v => v.isSecret).map(v => [v.key, v.value])
+	);
+}
+
+/**
+ * Get only NON-SECRET environment variables as a key-value record.
+ * Used for .env file operations where secrets should be excluded.
+ * @param stackName - Name of the stack
+ * @param environmentId - Optional environment ID
+ */
+export async function getNonSecretEnvVarsAsRecord(
+	stackName: string,
+	environmentId?: number | null
+): Promise<Record<string, string>> {
+	const vars = await getStackEnvVars(stackName, environmentId, false);
+	return Object.fromEntries(
+		vars.filter(v => !v.isSecret).map(v => [v.key, v.value])
+	);
+}
+
+/**
  * Set/replace all environment variables for a stack.
  * Deletes existing vars and inserts new ones in a transaction-like manner.
  * @param stackName - Name of the stack

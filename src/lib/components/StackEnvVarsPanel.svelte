@@ -1,15 +1,15 @@
 <script lang="ts">
-	import { tick, untrack } from 'svelte';
+	import { tick } from 'svelte';
 	import { Button } from '$lib/components/ui/button';
 	import StackEnvVarsEditor, { type EnvVar, type ValidationResult } from '$lib/components/StackEnvVarsEditor.svelte';
 	import CodeEditor from '$lib/components/CodeEditor.svelte';
 	import ConfirmPopover from '$lib/components/ConfirmPopover.svelte';
-	import { Plus, Info, Upload, Trash2, List, FileText, AlertTriangle } from 'lucide-svelte';
+	import { Plus, Info, Upload, Trash2, List, FileText, AlertTriangle, ShieldAlert } from 'lucide-svelte';
 	import * as Tooltip from '$lib/components/ui/tooltip';
 
 	interface Props {
-		variables: EnvVar[]; // Bindable - kept in sync with rawContent
-		rawContent?: string; // The actual content saved to disk - source of truth
+		variables: EnvVar[]; // Bindable - ALL variables (secrets + non-secrets)
+		rawContent: string; // Bindable - raw .env file content (comments preserved, no secrets)
 		validation?: ValidationResult | null;
 		readonly?: boolean;
 		showSource?: boolean;
@@ -45,14 +45,43 @@
 	let contentAreaRef: HTMLDivElement;
 	let parseWarnings = $state<string[]>([]);
 	let editorTheme = $state<'light' | 'dark'>('dark');
+	let hasMergedOnLoad = $state(false);
 
-	// Track previous variables to detect form changes
-	let prevVariablesJson = $state('');
+	// Count of secrets (for display in hint)
+	const secretCount = $derived(variables.filter(v => v.isSecret && v.key.trim()).length);
 
-	// Track if initial sync has been done (to distinguish initial load from user action)
-	let initialized = $state(false);
+	/**
+	 * Merge variables and rawContent on initial load.
+	 * Called by parent after setting both variables and rawContent.
+	 * This ensures both are in sync regardless of which view mode is active.
+	 */
+	export function mergeOnLoad() {
+		if (hasMergedOnLoad) return;
+		hasMergedOnLoad = true;
 
-	// Parse raw content to EnvVar array
+		// If rawContent exists, parse it and merge with variables (which may have secrets from DB)
+		if (rawContent.trim()) {
+			const { vars: rawVars } = parseRawContent(rawContent);
+			const rawVarsByKey = new Map(rawVars.map(v => [v.key, v]));
+
+			// Secrets come from variables (DB), non-secrets come from rawContent (file)
+			// But if a var exists in variables but not in rawContent, keep it (could be new)
+			const secrets = variables.filter(v => v.isSecret);
+			const nonSecretsFromRaw = rawVars;
+
+			// Also keep non-secrets from variables that aren't in raw (new vars added before first save)
+			const rawKeys = new Set(rawVars.map(v => v.key));
+			const newNonSecrets = variables.filter(v => !v.isSecret && v.key.trim() && !rawKeys.has(v.key));
+
+			variables = [...nonSecretsFromRaw, ...newNonSecrets, ...secrets];
+		}
+		// If no rawContent, variables is already correct (from DB), just need to generate raw
+		// for when user switches to text view (done in handleViewModeChange)
+	}
+
+	/**
+	 * Parse raw content to extract non-secret variables.
+	 */
 	function parseRawContent(content: string): { vars: EnvVar[], warnings: string[] } {
 		const result: EnvVar[] = [];
 		const warnings: string[] = [];
@@ -82,123 +111,124 @@
 					warnings.push(`Line ${lineNum}: "${key}" (invalid variable name)`);
 					continue;
 				}
-				result.push({
-					key,
-					value,
-					isSecret: existingSecretKeys.has(key) || false
-				});
+				result.push({ key, value, isSecret: false });
 			}
 		}
 
 		return { vars: result, warnings };
 	}
 
-	// Update rawContent when variables change - replace var lines by position, preserve comments
-	function syncRawContentFromVariables(newVars: EnvVar[]) {
+	/**
+	 * Sync variables (non-secrets) TO rawContent.
+	 * Preserves comments and formatting. Secrets are excluded.
+	 */
+	function syncVariablesToRaw() {
+		const nonSecretVars = variables.filter(v => v.key.trim() && !v.isSecret);
+
+		// If no raw content exists, generate fresh
+		if (!rawContent.trim()) {
+			if (nonSecretVars.length > 0) {
+				rawContent = nonSecretVars.map(v => `${v.key.trim()}=${v.value}`).join('\n') + '\n';
+			}
+			return;
+		}
+
+		// Update existing raw content - preserve comments, update/add/remove variables
+		const varMap = new Map(nonSecretVars.map(v => [v.key.trim(), v]));
+		const usedKeys = new Set<string>();
 		const lines = rawContent.split('\n');
 		const resultLines: string[] = [];
-		const varsWithKeys = newVars.filter(v => v.key.trim());
-		let varIdx = 0;
 
 		for (const line of lines) {
 			const trimmed = line.trim();
+
 			// Keep comments and blank lines
 			if (!trimmed || trimmed.startsWith('#')) {
 				resultLines.push(line);
 				continue;
 			}
 
+			// Check if this is a variable line
 			const eqIndex = trimmed.indexOf('=');
 			if (eqIndex > 0) {
 				const key = trimmed.slice(0, eqIndex).trim();
 				if (/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(key)) {
-					// This is a valid variable line - replace with var at current index
-					if (varIdx < varsWithKeys.length) {
-						const v = varsWithKeys[varIdx];
-						resultLines.push(`${v.key.trim()}=${v.value}`);
-						varIdx++;
+					const varData = varMap.get(key);
+					if (varData) {
+						// Update value
+						resultLines.push(`${key}=${varData.value}`);
+						usedKeys.add(key);
 					}
-					// If we have fewer vars, this line is deleted
+					// If not in varMap, variable was deleted - skip line
 					continue;
 				}
 			}
-			// Keep invalid lines as-is
+
 			resultLines.push(line);
 		}
 
-		// Append any new variables
-		while (varIdx < varsWithKeys.length) {
-			const v = varsWithKeys[varIdx];
-			resultLines.push(`${v.key.trim()}=${v.value}`);
-			varIdx++;
+		// Append new variables
+		for (const v of nonSecretVars) {
+			if (!usedKeys.has(v.key.trim())) {
+				resultLines.push(`${v.key.trim()}=${v.value}`);
+			}
 		}
 
 		let result = resultLines.join('\n');
 		if (result && !result.endsWith('\n')) {
 			result += '\n';
 		}
-		return result;
+		rawContent = result;
 	}
 
-	// When rawContent changes externally (text view, file load), update variables
-	$effect(() => {
+	/**
+	 * Sync rawContent TO variables.
+	 * Parses raw content for non-secrets, preserves existing secrets.
+	 */
+	function syncRawToVariables() {
 		const { vars, warnings } = parseRawContent(rawContent);
 		parseWarnings = warnings;
 
-		// Initial load with no .env file: don't overwrite DB-loaded variables
-		// Let the second $effect generate rawContent from the existing variables instead
-		if (!initialized && !rawContent.trim() && variables.length > 0) {
-			initialized = true;
-			return;
+		// Preserve existing secrets (they're not in rawContent)
+		const existingSecrets = variables.filter(v => v.isSecret);
+
+		// Merge: non-secrets from raw + existing secrets
+		variables = [...vars, ...existingSecrets];
+	}
+
+	/**
+	 * Call before saving. Ensures variables and rawContent are in sync.
+	 * Always syncs variables→raw to get proper .env content for disk.
+	 */
+	export function prepareForSave(): { rawContent: string; variables: EnvVar[] } {
+		// If in text view, first sync raw→variables to capture edits
+		if (viewMode === 'text') {
+			syncRawToVariables();
 		}
-		initialized = true;
+		// Then sync variables→raw to ensure rawContent is up to date
+		syncVariablesToRaw();
 
-		// When rawContent has content, merge parsed vars with existing DB secrets
-		// This handles the case where .env file exists but DB has additional secrets
-		let finalVars = vars;
-		if (rawContent.trim()) {
-			const parsedKeys = new Set(vars.map(v => v.key));
-			const existingSecrets = untrack(() =>
-				variables.filter(v => v.isSecret && !parsedKeys.has(v.key))
-			);
-			if (existingSecrets.length > 0) {
-				finalVars = [...vars, ...existingSecrets];
-			}
-		}
-
-		const newJson = JSON.stringify(finalVars.map(v => ({ key: v.key, value: v.value })));
-		// Use untrack to read variables without creating a dependency on it
-		// This prevents the effect from running when variables changes (only rawContent should trigger it)
-		const currentNonEmptyJson = untrack(() =>
-			JSON.stringify(variables.filter(v => v.key.trim()).map(v => ({ key: v.key, value: v.value })))
-		);
-
-		if (newJson !== currentNonEmptyJson) {
-			variables = finalVars;
-			prevVariablesJson = newJson;
-		}
-	});
-
-	// When variables change from form edits, update rawContent
-	$effect(() => {
-		const currentJson = JSON.stringify(variables.map(v => ({ key: v.key, value: v.value })));
-
-		// Only sync if variables actually changed (not from parsing rawContent)
-		if (currentJson !== prevVariablesJson) {
-			prevVariablesJson = currentJson;
-			const newRaw = syncRawContentFromVariables(variables);
-			if (newRaw !== rawContent) {
-				rawContent = newRaw;
-			}
-		}
-	});
+		return {
+			rawContent,
+			variables: variables.filter(v => v.key.trim())
+		};
+	}
 
 	function handleTextChange(value: string) {
 		rawContent = value;
+		syncRawToVariables(); // Sync to variables so parent's envVars updates (for compose decorations)
 		onchange?.();
 	}
 
 	function handleViewModeChange(newMode: 'form' | 'text') {
+		if (newMode === 'text' && viewMode === 'form') {
+			// Form → Text: sync variables to raw (preserves comments)
+			syncVariablesToRaw();
+		} else if (newMode === 'form' && viewMode === 'text') {
+			// Text → Form: sync raw to variables (preserves secrets)
+			syncRawToVariables();
+		}
+
 		viewMode = newMode;
 		localStorage.setItem(STORAGE_KEY_VIEW_MODE, newMode);
 	}
@@ -233,6 +263,11 @@
 		const reader = new FileReader();
 		reader.onload = (e) => {
 			rawContent = e.target?.result as string;
+			// Parse and merge with existing secrets
+			syncRawToVariables();
+			// Switch to text view to show loaded content
+			viewMode = 'text';
+			localStorage.setItem(STORAGE_KEY_VIEW_MODE, 'text');
 			onchange?.();
 		};
 		reader.readAsText(file);
@@ -333,9 +368,14 @@
 				<span><span class="text-zinc-500 dark:text-zinc-400">${`{VAR:-default}`}</span> optional</span>
 				<span><span class="text-zinc-500 dark:text-zinc-400">${`{VAR:?error}`}</span> required w/ error</span>
 			</div>
-		{:else}
-			<div class="text-2xs text-zinc-400 dark:text-zinc-500">
-				Raw .env file (comments preserved, saved exactly as typed)
+		{:else if secretCount > 0}
+			<!-- Text view hint about secrets (only shown when secrets exist) -->
+			<div class="flex items-start gap-2 px-2 py-1.5 rounded bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800/50">
+				<ShieldAlert class="w-3.5 h-3.5 text-amber-500 shrink-0 mt-0.5" />
+				<div class="text-2xs text-amber-700 dark:text-amber-300">
+					<span class="font-medium">{secretCount} secret{secretCount === 1 ? '' : 's'} not shown.</span>
+					<span class="text-amber-600 dark:text-amber-400">Secrets are never written to disk and are injected via shell environment when the stack starts.</span>
+				</div>
 			</div>
 		{/if}
 		<!-- Parse warnings (form mode only) -->

@@ -7,11 +7,12 @@
 	import CodeEditor, { type VariableMarker } from '$lib/components/CodeEditor.svelte';
 	import StackEnvVarsPanel from '$lib/components/StackEnvVarsPanel.svelte';
 	import { type EnvVar, type ValidationResult } from '$lib/components/StackEnvVarsEditor.svelte';
-	import { Layers, Save, Play, Code, GitGraph, Loader2, AlertCircle, X, Sun, Moon, TriangleAlert, ChevronsLeft, ChevronsRight, Variable, HelpCircle, GripVertical } from 'lucide-svelte';
+	import { Layers, Save, Play, Code, GitGraph, Loader2, AlertCircle, X, Sun, Moon, TriangleAlert, ChevronsLeft, ChevronsRight, Variable, HelpCircle, GripVertical, FolderOpen } from 'lucide-svelte';
 	import * as Tooltip from '$lib/components/ui/tooltip';
 	import { currentEnvironment, appendEnvParam } from '$lib/stores/environment';
 	import { focusFirstInput } from '$lib/utils';
 	import * as Alert from '$lib/components/ui/alert';
+	import { ErrorDialog } from '$lib/components/ui/error-dialog';
 	import ComposeGraphViewer from './ComposeGraphViewer.svelte';
 
 	// localStorage key for persisted split ratio
@@ -41,19 +42,29 @@
 
 	// Environment variables state
 	let envVars = $state<EnvVar[]>([]);
-	let rawEnvContent = $state('');
+	let rawEnvContent = $state(''); // Raw .env file content (comments preserved)
 	let envValidation = $state<ValidationResult | null>(null);
 	let validating = $state(false);
 	let existingSecretKeys = $state<Set<string>>(new Set());
+	let hadExistingDbVars = $state(false); // Track if DB had any vars on load (for proper cleanup)
 
 	// Simple dirty flag - only set when user touches something
 	let isDirty = $state(false);
+
+	// Error dialog state
+	let operationError = $state<{ title: string; message: string; details?: string } | null>(null);
+
+	// Stack location (for edit mode)
+	let stackLocation = $state<string | null>(null);
 
 	// CodeEditor reference for explicit marker updates
 	let codeEditorRef: CodeEditor | null = $state(null);
 
 	// ComposeGraphViewer reference for resize on panel toggle
 	let graphViewerRef: ComposeGraphViewer | null = $state(null);
+
+	// EnvVarsPanel reference for sync before save
+	let envVarsPanelRef: StackEnvVarsPanel | null = $state(null);
 
 	// Resizable split panel state
 	let splitRatio = $state(60); // percentage for compose panel
@@ -239,33 +250,37 @@ services:
 			}
 
 			composeContent = data.content;
+			stackLocation = data.stackDir || null;
 
 			// Load environment variables (parsed)
 			const envResponse = await fetch(appendEnvParam(`/api/stacks/${encodeURIComponent(stackName)}/env`, envId));
 			if (envResponse.ok) {
 				const envData = await envResponse.json();
 				envVars = envData.variables || [];
+				// Track if DB had any vars (for proper cleanup on clear-all)
+				hadExistingDbVars = envVars.length > 0;
 				// Track existing secret keys (secrets loaded from DB cannot have visibility toggled)
 				existingSecretKeys = new Set(
 					envVars.filter(v => v.isSecret && v.key.trim()).map(v => v.key.trim())
 				);
 			}
 
-			// Load raw .env file content
+			// Load raw .env file content (for preserving comments)
 			const rawEnvResponse = await fetch(appendEnvParam(`/api/stacks/${encodeURIComponent(stackName)}/env/raw`, envId));
 			if (rawEnvResponse.ok) {
 				const rawEnvData = await rawEnvResponse.json();
 				rawEnvContent = rawEnvData.content || '';
+				console.log('[loadComposeFile] rawEnvContent loaded:', rawEnvContent);
 			}
-
-			// Wait for $effects in StackEnvVarsPanel to settle (parses raw content, syncs variables)
-			await tick();
-			// Reset dirty flag after loading completes
-			isDirty = false;
 		} catch (e: any) {
 			loadError = e.message;
 		} finally {
 			loading = false;
+			// Merge variables and rawContent after both are loaded
+			await tick();
+			envVarsPanelRef?.mergeOnLoad();
+			// Reset dirty flag after loading completes
+			isDirty = false;
 		}
 	}
 
@@ -328,13 +343,13 @@ services:
 		saving = true;
 		error = null;
 
+		// Prepare env vars for creating - syncs variables and rawContent
+		const prepared = envVarsPanelRef?.prepareForSave() || { rawContent: '', variables: [] };
+
 		try {
 			const envId = $currentEnvironment?.id ?? null;
 
-			// Collect environment variables
-			const definedVars = envVars.filter(v => v.key.trim());
-
-			// Create the stack (include env vars so they're available before start)
+			// Create the stack (include env vars and raw content for .env file)
 			const response = await fetch(appendEnvParam('/api/stacks', envId), {
 				method: 'POST',
 				headers: { 'Content-Type': 'application/json' },
@@ -342,7 +357,10 @@ services:
 					name: newStackName.trim(),
 					compose: content,
 					start,
-					envVars: definedVars.length > 0 ? definedVars.map(v => ({
+					// Send raw env content (non-secrets only, preserves comments/formatting)
+					rawEnvContent: prepared.rawContent.trim() ? prepared.rawContent : undefined,
+					// Also send parsed vars for DB secret tracking (includes secrets)
+					envVars: prepared.variables.length > 0 ? prepared.variables.map(v => ({
 						key: v.key.trim(),
 						value: v.value,
 						isSecret: v.isSecret
@@ -358,7 +376,11 @@ services:
 			onSuccess();
 			handleClose();
 		} catch (e: any) {
-			error = e.message;
+			operationError = {
+				title: 'Failed to create stack',
+				message: e.message || 'An error occurred while creating the stack',
+				details: e.details
+			};
 		} finally {
 			saving = false;
 		}
@@ -374,6 +396,9 @@ services:
 
 		saving = true;
 		error = null;
+
+		// Prepare env vars for saving - syncs variables and rawContent
+		const prepared = envVarsPanelRef?.prepareForSave() || { rawContent: '', variables: [] };
 
 		try {
 			const envId = $currentEnvironment?.id ?? null;
@@ -397,56 +422,50 @@ services:
 				throw new Error(data.error || 'Failed to save compose file');
 			}
 
-			// Save environment variables
-			// Always save to raw endpoint for consistency
-			// If no raw content but has env vars, generate raw content from vars (backward compat)
-			const definedVars = envVars.filter(v => v.key.trim());
-			let contentToSave = rawEnvContent;
+			// Save raw content to .env file (non-secrets only, comments preserved)
+			const rawEnvResponse = await fetch(
+				appendEnvParam(`/api/stacks/${encodeURIComponent(stackName)}/env/raw`, envId),
+				{
+					method: 'PUT',
+					headers: { 'Content-Type': 'application/json' },
+					body: JSON.stringify({ content: prepared.rawContent })
+				}
+			);
 
-			// Backward compatibility: if no raw file but has DB envs, generate raw content
-			if (!contentToSave.trim() && definedVars.length > 0) {
-				contentToSave = definedVars.map(v => `${v.key.trim()}=${v.value}`).join('\n') + '\n';
+			if (!rawEnvResponse.ok) {
+				const rawEnvError = await rawEnvResponse.json().catch(() => ({ error: 'Failed to save environment file' }));
+				throw new Error(rawEnvError.error || 'Failed to save environment file');
 			}
 
-			// Save if there's any content
-			if (contentToSave.trim() || definedVars.length > 0) {
-				const rawEnvResponse = await fetch(
-					appendEnvParam(`/api/stacks/${encodeURIComponent(stackName)}/env/raw`, envId),
+			// Save ALL vars to DB (includes secrets with real values)
+			const definedVars = prepared.variables;
+			if (definedVars.length > 0 || hadExistingDbVars) {
+				const envResponse = await fetch(
+					appendEnvParam(`/api/stacks/${encodeURIComponent(stackName)}/env`, envId),
 					{
 						method: 'PUT',
 						headers: { 'Content-Type': 'application/json' },
-						body: JSON.stringify({ content: contentToSave })
+						body: JSON.stringify({
+							variables: definedVars.map(v => ({
+								key: v.key.trim(),
+								value: v.value,
+								isSecret: v.isSecret
+							}))
+						})
 					}
 				);
 
-				if (!rawEnvResponse.ok) {
-					console.error('Failed to save environment file');
+				if (!envResponse.ok) {
+					// Log but don't fail - DB stores secret metadata
+					console.warn('Failed to save environment variable metadata to database');
 				}
 
-				// Also save to DB for secret tracking
-				if (definedVars.some(v => v.isSecret)) {
-					const envResponse = await fetch(
-						appendEnvParam(`/api/stacks/${encodeURIComponent(stackName)}/env`, envId),
-						{
-							method: 'PUT',
-							headers: { 'Content-Type': 'application/json' },
-							body: JSON.stringify({
-								variables: definedVars.map(v => ({
-									key: v.key.trim(),
-									value: v.value,
-									isSecret: v.isSecret
-								}))
-							})
-						}
-					);
-
-					if (!envResponse.ok) {
-						console.error('Failed to save secret markers to database');
-					}
-				}
+				hadExistingDbVars = definedVars.length > 0;
+				existingSecretKeys = new Set(
+					definedVars.filter(v => v.isSecret && v.key.trim()).map(v => v.key.trim())
+				);
 			}
 
-			rawEnvContent = contentToSave; // Sync raw content if it was generated
 			isDirty = false; // Reset dirty flag after successful save
 			onSuccess();
 
@@ -457,7 +476,11 @@ services:
 				handleClose();
 			}
 		} catch (e: any) {
-			error = e.message;
+			operationError = {
+				title: restart ? 'Failed to apply stack' : 'Failed to save stack',
+				message: e.message || (restart ? 'An error occurred while applying the stack' : 'An error occurred while saving the stack'),
+				details: e.details
+			};
 		} finally {
 			saving = false;
 		}
@@ -481,16 +504,19 @@ services:
 		newStackName = '';
 		error = null;
 		loadError = null;
+		rawEnvContent = '';
 		errors = {};
 		composeContent = '';
 		envVars = [];
-		rawEnvContent = '';
 		envValidation = null;
 		isDirty = false;
 		existingSecretKeys = new Set();
+		hadExistingDbVars = false;
 		activeTab = 'editor';
 		showConfirmClose = false;
 		codeEditorRef = null;
+		operationError = null;
+		stackLocation = null;
 		onClose();
 	}
 
@@ -575,6 +601,11 @@ services:
 							<Dialog.Description class="text-xs text-zinc-500 dark:text-zinc-400">
 								{#if mode === 'create'}
 									Create a new Docker Compose stack
+								{:else if stackLocation}
+									<span class="flex items-center gap-1">
+										<FolderOpen class="w-3 h-3" />
+										<code class="bg-zinc-200 dark:bg-zinc-700 px-1 rounded text-2xs">{stackLocation}</code>
+									</span>
 								{:else}
 									Edit compose file and view stack structure
 								{/if}
@@ -629,13 +660,6 @@ services:
 		</Dialog.Header>
 
 		<div class="flex-1 overflow-hidden flex flex-col min-h-0">
-			{#if error}
-				<Alert.Root variant="destructive" class="mx-6 mt-4">
-					<TriangleAlert class="h-4 w-4" />
-					<Alert.Description>{error}</Alert.Description>
-				</Alert.Root>
-			{/if}
-
 			{#if errors.compose}
 				<Alert.Root variant="destructive" class="mx-6 mt-4">
 					<TriangleAlert class="h-4 w-4" />
@@ -757,6 +781,7 @@ services:
 							</div>
 							<div class="flex-1 min-h-0 overflow-hidden">
 								<StackEnvVarsPanel
+									bind:this={envVarsPanelRef}
 									bind:variables={envVars}
 									bind:rawContent={rawEnvContent}
 									validation={envValidation}
@@ -858,3 +883,15 @@ services:
 		</div>
 	</Dialog.Content>
 </Dialog.Root>
+
+<!-- Error dialog for failed operations -->
+{#if operationError}
+	{@const errorDialogOpen = true}
+	<ErrorDialog
+		open={errorDialogOpen}
+		title={operationError.title}
+		message={operationError.message}
+		details={operationError.details}
+		onClose={() => operationError = null}
+	/>
+{/if}

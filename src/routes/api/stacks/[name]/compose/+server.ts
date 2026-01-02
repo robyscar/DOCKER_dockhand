@@ -19,7 +19,7 @@ export const GET: RequestHandler = async ({ params, cookies }) => {
 			return json({ error: result.error }, { status: 404 });
 		}
 
-		return json({ content: result.content });
+		return json({ content: result.content, stackDir: result.stackDir });
 	} catch (error: any) {
 		console.error(`Error getting compose file for stack ${name}:`, error);
 		return json({ error: error.message || 'Failed to get compose file' }, { status: 500 });

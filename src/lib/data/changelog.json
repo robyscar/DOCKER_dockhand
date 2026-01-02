@@ -3,6 +3,7 @@
     "version": "1.0.5",
     "date": "2026-01-01",
     "changes": [
+      { "type": "feature", "text": "Custom hardened image built from scratch using Wolfi packages, eliminating Alpine vulnerabilities" },
       { "type": "feature", "text": "Clicking container name opens container details" },
       { "type": "feature", "text": "Clicking stack name opens stack editor (internal stacks)" },
       { "type": "feature", "text": "Stack env editor now supports freestyle text entry for pasting env contents" },

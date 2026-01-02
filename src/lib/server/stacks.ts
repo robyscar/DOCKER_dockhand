@@ -10,6 +10,9 @@ import { join, resolve } from 'node:path';
 import {
 	getEnvironment,
 	getStackEnvVarsAsRecord,
+	getSecretEnvVarsAsRecord,
+	getNonSecretEnvVarsAsRecord,
+	getStackEnvVars,
 	setStackEnvVars,
 	getStackSource,
 	upsertStackSource,
@@ -257,7 +260,7 @@ export function listManagedStacks(): string[] {
  */
 export async function getStackComposeFile(
 	stackName: string
-): Promise<{ success: boolean; content?: string; error?: string }> {
+): Promise<{ success: boolean; content?: string; stackDir?: string; error?: string }> {
 	const stacksDir = getStacksDir();
 	const stackDir = join(stacksDir, stackName);
 	const composeFile = join(stackDir, 'docker-compose.yml');
@@ -266,7 +269,8 @@ export async function getStackComposeFile(
 	if (await ymlFile.exists()) {
 		return {
 			success: true,
-			content: await ymlFile.text()
+			content: await ymlFile.text(),
+			stackDir
 		};
 	}
 
@@ -274,7 +278,8 @@ export async function getStackComposeFile(
 	if (await yamlFile.exists()) {
 		return {
 			success: true,
-			content: await yamlFile.text()
+			content: await yamlFile.text(),
+			stackDir
 		};
 	}
 
@@ -351,7 +356,10 @@ interface ComposeCommandOptions {
 }
 
 /**
- * Execute a docker compose command locally via Bun.spawn
+ * Execute a docker compose command locally via Bun.spawn.
+ *
+ * @param envVars - Non-secret environment variables (from .env file, passed for backward compat)
+ * @param secretVars - Secret environment variables (injected via shell env, NEVER written to disk)
  */
 async function executeLocalCompose(
 	operation: 'up' | 'down' | 'stop' | 'start' | 'restart' | 'pull',
@@ -359,6 +367,7 @@ async function executeLocalCompose(
 	composeContent: string,
 	dockerHost?: string,
 	envVars?: Record<string, string>,
+	secretVars?: Record<string, string>,
 	forceRecreate?: boolean,
 	removeVolumes?: boolean
 ): Promise<StackOperationResult> {
@@ -370,16 +379,22 @@ async function executeLocalCompose(
 	const composeFile = join(stackDir, 'docker-compose.yml');
 	await Bun.write(composeFile, composeContent);
 
-	// Note: .env file is written when env vars are saved via API
-	// Docker compose automatically reads .env from the stack directory
-	// We only need to pass env vars to process environment for variable substitution
-	// in case the .env file doesn't exist yet (e.g., first deploy)
+	// Build spawn environment:
+	// 1. Start with process.env
+	// 2. Add DOCKER_HOST if specified
+	// 3. Add non-secret envVars (for backward compat when .env file doesn't exist)
+	// 4. Add secret envVars (CRITICAL: these are NEVER written to disk, only passed via shell env)
 	const spawnEnv: Record<string, string> = { ...(process.env as Record<string, string>) };
 	if (dockerHost) {
 		spawnEnv.DOCKER_HOST = dockerHost;
 	}
+	// Non-secret vars (backup for when .env file doesn't exist yet)
 	if (envVars) {
 		Object.assign(spawnEnv, envVars);
+	}
+	// SECRET vars: injected via shell environment at runtime (NEVER written to .env file)
+	if (secretVars) {
+		Object.assign(spawnEnv, secretVars);
 	}
 
 	// Build command based on operation
@@ -505,7 +520,10 @@ async function executeLocalCompose(
 }
 
 /**
- * Execute a docker compose command via Hawser agent
+ * Execute a docker compose command via Hawser agent.
+ *
+ * @param envVars - Non-secret environment variables (from .env file)
+ * @param secretVars - Secret environment variables (injected via shell env on Hawser, NEVER in .env)
  */
 async function executeComposeViaHawser(
 	operation: 'up' | 'down' | 'stop' | 'start' | 'restart' | 'pull',
@@ -513,6 +531,7 @@ async function executeComposeViaHawser(
 	composeContent: string,
 	envId: number,
 	envVars?: Record<string, string>,
+	secretVars?: Record<string, string>,
 	forceRecreate?: boolean,
 	removeVolumes?: boolean,
 	stackFiles?: Record<string, string>
@@ -521,6 +540,11 @@ async function executeComposeViaHawser(
 	// Import dockerFetch dynamically to avoid circular dependency
 	const { dockerFetch } = await import('./docker.js');
 
+	// Merge envVars and secretVars for passing to Hawser
+	// Hawser will inject ALL these as shell environment variables (secrets are NOT written to .env)
+	const allEnvVars = { ...(envVars || {}), ...(secretVars || {}) };
+	const secretCount = secretVars ? Object.keys(secretVars).length : 0;
+
 	console.log(`${logPrefix} ----------------------------------------`);
 	console.log(`${logPrefix} EXECUTE COMPOSE VIA HAWSER`);
 	console.log(`${logPrefix} ----------------------------------------`);
@@ -528,9 +552,10 @@ async function executeComposeViaHawser(
 	console.log(`${logPrefix} Environment ID:`, envId);
 	console.log(`${logPrefix} Force recreate:`, forceRecreate ?? false);
 	console.log(`${logPrefix} Remove volumes:`, removeVolumes ?? false);
-	console.log(`${logPrefix} Env vars count:`, envVars ? Object.keys(envVars).length : 0);
-	if (envVars && Object.keys(envVars).length > 0) {
-		console.log(`${logPrefix} Env vars being sent (masked):`, JSON.stringify(maskSecrets(envVars), null, 2));
+	console.log(`${logPrefix} Non-secret env vars count:`, envVars ? Object.keys(envVars).length : 0);
+	console.log(`${logPrefix} Secret env vars count:`, secretCount);
+	if (allEnvVars && Object.keys(allEnvVars).length > 0) {
+		console.log(`${logPrefix} All env vars being sent (masked):`, JSON.stringify(maskSecrets(allEnvVars), null, 2));
 	}
 	console.log(`${logPrefix} Compose content length:`, composeContent.length, 'chars');
 	console.log(`${logPrefix} Stack files count:`, stackFiles ? Object.keys(stackFiles).length : 0);
@@ -539,22 +564,30 @@ async function executeComposeViaHawser(
 	}
 
 	try {
-		// Build files map - include .env file if envVars provided
+		// Build files map - include .env file ONLY for non-secret envVars
+		// Secrets are passed separately via allEnvVars and injected via shell env
 		const files: Record<string, string> = { ...(stackFiles || {}) };
 		if (envVars && Object.keys(envVars).length > 0) {
-			const envContent = Object.entries(envVars)
-				.map(([key, value]) => `${key}=${value}`)
-				.join('\n');
-			files['.env'] = envContent;
-			console.log(`${logPrefix} Added .env file to files map with ${Object.keys(envVars).length} variables`);
+			if (files['.env']) {
+				// stackFiles already has .env (e.g., from git repo with comments)
+				// Don't overwrite - the envVars are already passed separately for variable substitution
+				console.log(`${logPrefix} Preserving existing .env from stackFiles (${files['.env'].length} chars), envVars passed separately for substitution`);
+			} else {
+				// No .env in stackFiles - generate one from NON-SECRET envVars only
+				const envContent = Object.entries(envVars)
+					.map(([key, value]) => `${key}=${value}`)
+					.join('\n');
+				files['.env'] = envContent;
+				console.log(`${logPrefix} Generated .env file with ${Object.keys(envVars).length} non-secret variables`);
+			}
 		}
 
 		const body = JSON.stringify({
 			operation,
 			projectName: stackName,
 			composeFile: composeContent,
-			envVars: envVars || {},
-			files, // All files including .env
+			envVars: allEnvVars, // All vars (including secrets) - Hawser injects via shell env
+			files, // Files including .env (secrets NOT in .env file)
 			forceRecreate: forceRecreate || false,
 			removeVolumes: removeVolumes || false
 		});
@@ -610,13 +643,17 @@ async function executeComposeViaHawser(
 }
 
 /**
- * Route compose command to appropriate executor based on connection type
+ * Route compose command to appropriate executor based on connection type.
+ *
+ * @param envVars - Non-secret environment variables (from .env file)
+ * @param secretVars - Secret environment variables (from DB, injected via shell env)
  */
 async function executeComposeCommand(
 	operation: 'up' | 'down' | 'stop' | 'start' | 'restart' | 'pull',
 	options: ComposeCommandOptions,
 	composeContent: string,
-	envVars?: Record<string, string>
+	envVars?: Record<string, string>,
+	secretVars?: Record<string, string>
 ): Promise<StackOperationResult> {
 	const { stackName, envId, forceRecreate, removeVolumes, stackFiles } = options;
 
@@ -631,6 +668,7 @@ async function executeComposeCommand(
 			composeContent,
 			undefined,
 			envVars,
+			secretVars,
 			forceRecreate,
 			removeVolumes
 		);
@@ -645,6 +683,7 @@ async function executeComposeCommand(
 				composeContent,
 				envId!,
 				envVars,
+				secretVars,
 				forceRecreate,
 				removeVolumes,
 				stackFiles
@@ -659,6 +698,7 @@ async function executeComposeCommand(
 				composeContent,
 				dockerHost,
 				envVars,
+				secretVars,
 				forceRecreate,
 				removeVolumes
 			);
@@ -672,6 +712,7 @@ async function executeComposeCommand(
 				composeContent,
 				undefined,
 				envVars,
+				secretVars,
 				forceRecreate,
 				removeVolumes
 			);
@@ -842,12 +883,20 @@ async function withContainerFallback(
 // =============================================================================
 
 /**
- * Ensure we have a compose file for operations, throw appropriate error if not
+ * Ensure we have a compose file for operations, throw appropriate error if not.
+ *
+ * Returns:
+ * - content: The compose file content
+ * - envVars: Non-secret variables (from .env file, with DB fallback)
+ * - secretVars: Secret variables (from DB only, for shell injection)
+ *
+ * SECURITY: Secrets are NEVER written to .env files. They are stored in the database
+ * and injected via shell environment variables at runtime.
  */
 async function requireComposeFile(
 	stackName: string,
 	envId?: number | null
-): Promise<{ content: string; envVars: Record<string, string> }> {
+): Promise<{ content: string; envVars: Record<string, string>; secretVars: Record<string, string> }> {
 	const composeResult = await getStackComposeFile(stackName);
 
 	if (!composeResult.success) {
@@ -859,11 +908,14 @@ async function requireComposeFile(
 		throw new ComposeFileNotFoundError(stackName);
 	}
 
-	// Get environment variables from database
-	const dbEnvVars = await getStackEnvVarsAsRecord(stackName, envId);
+	// Get SECRET variables from database (for shell injection at runtime)
+	// These are NEVER written to disk
+	const secretVars = await getSecretEnvVarsAsRecord(stackName, envId);
 
-	// Also read from .env file and merge (file + DB are equal sources)
-	// DB values take precedence for secrets, file values for new/changed vars
+	// Get non-secret variables from database (for backward compatibility)
+	const dbNonSecretVars = await getNonSecretEnvVarsAsRecord(stackName, envId);
+
+	// Read non-secret vars from .env file (user can edit this file manually)
 	const stackDir = join(getStacksDir(), stackName);
 	const envFilePath = join(stackDir, '.env');
 	let fileEnvVars: Record<string, string> = {};
@@ -890,10 +942,11 @@ async function requireComposeFile(
 		}
 	}
 
-	// Merge: file values as base, DB values override (DB is authoritative for managed vars)
-	const envVars = { ...fileEnvVars, ...dbEnvVars };
+	// Merge non-secret vars: DB as fallback, file values override
+	// This ensures external edits to .env are respected during deployment
+	const envVars = { ...dbNonSecretVars, ...fileEnvVars };
 
-	return { content: composeResult.content!, envVars };
+	return { content: composeResult.content!, envVars, secretVars };
 }
 
 /**
@@ -905,8 +958,8 @@ export async function startStack(
 	envId?: number | null
 ): Promise<StackOperationResult> {
 	try {
-		const { content, envVars } = await requireComposeFile(stackName, envId);
-		return executeComposeCommand('up', { stackName, envId }, content, envVars);
+		const { content, envVars, secretVars } = await requireComposeFile(stackName, envId);
+		return executeComposeCommand('up', { stackName, envId }, content, envVars, secretVars);
 	} catch (err) {
 		if (err instanceof ExternalStackError) {
 			return withContainerFallback(stackName, envId, 'start');
@@ -924,8 +977,8 @@ export async function stopStack(
 	envId?: number | null
 ): Promise<StackOperationResult> {
 	try {
-		const { content, envVars } = await requireComposeFile(stackName, envId);
-		return executeComposeCommand('stop', { stackName, envId }, content, envVars);
+		const { content, envVars, secretVars } = await requireComposeFile(stackName, envId);
+		return executeComposeCommand('stop', { stackName, envId }, content, envVars, secretVars);
 	} catch (err) {
 		if (err instanceof ExternalStackError) {
 			return withContainerFallback(stackName, envId, 'stop');
@@ -943,8 +996,8 @@ export async function restartStack(
 	envId?: number | null
 ): Promise<StackOperationResult> {
 	try {
-		const { content, envVars } = await requireComposeFile(stackName, envId);
-		return executeComposeCommand('restart', { stackName, envId }, content, envVars);
+		const { content, envVars, secretVars } = await requireComposeFile(stackName, envId);
+		return executeComposeCommand('restart', { stackName, envId }, content, envVars, secretVars);
 	} catch (err) {
 		if (err instanceof ExternalStackError) {
 			return withContainerFallback(stackName, envId, 'restart');
@@ -963,8 +1016,8 @@ export async function downStack(
 	removeVolumes = false
 ): Promise<StackOperationResult> {
 	try {
-		const { content, envVars } = await requireComposeFile(stackName, envId);
-		return executeComposeCommand('down', { stackName, envId, removeVolumes }, content, envVars);
+		const { content, envVars, secretVars } = await requireComposeFile(stackName, envId);
+		return executeComposeCommand('down', { stackName, envId, removeVolumes }, content, envVars, secretVars);
 	} catch (err) {
 		if (err instanceof ExternalStackError) {
 			// For external stacks, down is the same as stop (no compose file to tear down)
@@ -989,12 +1042,14 @@ export async function removeStack(
 
 		// If compose file exists, run docker compose down first
 		if (composeResult.success) {
-			const envVars = await getStackEnvVarsAsRecord(stackName, envId);
+			const envVars = await getNonSecretEnvVarsAsRecord(stackName, envId);
+			const secretVars = await getSecretEnvVarsAsRecord(stackName, envId);
 			const downResult = await executeComposeCommand(
 				'down',
 				{ stackName, envId },
 				composeResult.content!,
-				envVars
+				envVars,
+				secretVars
 			);
 			if (!downResult.success && !force) {
 				return downResult;
@@ -1198,9 +1253,9 @@ export async function pullStackImages(
 	stackName: string,
 	envId?: number | null
 ): Promise<{ success: boolean; output?: string; error?: string }> {
-	const { content, envVars } = await requireComposeFile(stackName, envId);
+	const { content, envVars, secretVars } = await requireComposeFile(stackName, envId);
 
-	return executeComposeCommand('pull', { stackName, envId }, content, envVars);
+	return executeComposeCommand('pull', { stackName, envId }, content, envVars, secretVars);
 }
 
 // =============================================================================
@@ -1239,6 +1294,30 @@ export async function writeStackEnvFile(
 		.map(v => `${v.key.trim()}=${v.value}`)
 		.join('\n') + '\n';
 
+	await Bun.write(envFilePath, rawContent);
+}
+
+/**
+ * Write raw environment content directly to the .env file (preserves comments/formatting)
+ */
+export async function writeRawStackEnvFile(
+	stackName: string,
+	rawContent: string
+): Promise<void> {
+	// Guard against writing masked secret placeholders (would corrupt the file)
+	if (rawContent.match(/^[A-Za-z_][A-Za-z0-9_]*=\*\*\*$/m)) {
+		throw new Error('Cannot write masked placeholder "***" to .env file - this would corrupt secret values');
+	}
+
+	const stacksDir = getStacksDir();
+	const stackDir = join(stacksDir, stackName);
+
+	// Ensure stack directory exists
+	if (!existsSync(stackDir)) {
+		mkdirSync(stackDir, { recursive: true });
+	}
+
+	const envFilePath = join(stackDir, '.env');
 	await Bun.write(envFilePath, rawContent);
 }
 

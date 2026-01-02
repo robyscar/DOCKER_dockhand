@@ -1,6 +1,75 @@
-# Build stage - using Debian to avoid Alpine musl thread creation issues
+# syntax=docker/dockerfile:1.4
+# =============================================================================
+# Dockhand Docker Image - Security-Hardened Build
+# =============================================================================
+# This Dockerfile builds a custom Wolfi OS from scratch using apko, ensuring:
+# - Full transparency (no dependency on pre-built Chainguard images)
+# - Reproducible builds from open-source Wolfi packages
+# - Minimal attack surface with only required packages
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# Stage 1: OS Generator (Alpine + apko tool)
+# -----------------------------------------------------------------------------
+# We use Alpine because it has a shell. This lets us download and run apko
+# to build our custom Wolfi OS from scratch using open-source packages.
+FROM alpine:3.21 AS os-builder
+
+WORKDIR /work
+
+# Install apko tool (latest stable release)
+# apko is the tool Chainguard uses to build their images - we use it directly
+ARG APKO_VERSION=0.30.34
+ARG TARGETARCH
+RUN apk add --no-cache curl \
+    && ARCH=$([ "$TARGETARCH" = "arm64" ] && echo "arm64" || echo "amd64") \
+    && curl -sL "https://github.com/chainguard-dev/apko/releases/download/v${APKO_VERSION}/apko_${APKO_VERSION}_linux_${ARCH}.tar.gz" \
+       | tar -xz --strip-components=1 -C /usr/local/bin \
+    && chmod +x /usr/local/bin/apko
+
+# Generate apko.yaml for current target architecture only
+# We build single-arch to avoid multi-arch layer confusion in extraction
+RUN APKO_ARCH=$([ "$TARGETARCH" = "arm64" ] && echo "aarch64" || echo "x86_64") \
+    && printf '%s\n' \
+    "contents:" \
+    "  repositories:" \
+    "    - https://packages.wolfi.dev/os" \
+    "  keyring:" \
+    "    - https://packages.wolfi.dev/os/wolfi-signing.rsa.pub" \
+    "  packages:" \
+    "    - wolfi-base" \
+    "    - ca-certificates" \
+    "    - busybox" \
+    "    - tzdata" \
+    "    - bun" \
+    "    - docker-cli" \
+    "    - docker-compose" \
+    "    - sqlite" \
+    "    - git" \
+    "    - openssh-client" \
+    "    - curl" \
+    "    - tini" \
+    "    - su-exec" \
+    "entrypoint:" \
+    "  command: /bin/sh -l" \
+    "archs:" \
+    "  - ${APKO_ARCH}" \
+    > apko.yaml
+
+# Build the OS tarball and extract rootfs
+# apko creates an OCI tarball - we need to extract the actual filesystem layer
+RUN apko build apko.yaml dockhand-base:latest output.tar \
+    && mkdir -p rootfs \
+    && tar -xf output.tar \
+    && LAYER=$(tar -tf output.tar | grep '.tar.gz$' | head -1) \
+    && tar -xzf "$LAYER" -C rootfs
+
+# -----------------------------------------------------------------------------
+# Stage 2: Application Builder
+# -----------------------------------------------------------------------------
+# Using Debian to avoid Alpine musl thread creation issues
 # Alpine's musl libc causes rayon/tokio thread pool panics during svelte-adapter-bun build
-FROM oven/bun:1.3.5-debian AS builder
+FROM oven/bun:1.3.5-debian AS app-builder
 
 WORKDIR /app
 
@@ -15,72 +84,71 @@ RUN bun install --frozen-lockfile
 COPY . .
 
 # Build with parallelism - dedicated build VM has 16 CPUs and 32GB RAM
-# Increased memory limits for parallel compilation with larger semi-space for GC
 RUN NODE_OPTIONS="--max-old-space-size=8192 --max-semi-space-size=128" bun run build
 
-# Production stage - minimal Alpine with Bun runtime
-FROM oven/bun:1.3.5-alpine
+# Prepare production node_modules (do this in builder where we have compilers)
+# This ensures native addons compile correctly before copying to hardened runtime
+RUN rm -rf node_modules && bun install --production --frozen-lockfile \
+    && rm -rf node_modules/@types node_modules/bun-types
+
+# -----------------------------------------------------------------------------
+# Stage 3: Final Image (Scratch + Custom Wolfi OS)
+# -----------------------------------------------------------------------------
+FROM scratch
+
+# Install our custom-built Wolfi OS (now we have /bin/sh!)
+COPY --from=os-builder /work/rootfs/ /
 
 WORKDIR /app
 
-# Install runtime dependencies, create user
-# Add sqlite for emergency scripts, git for stack git operations, curl for healthchecks
-# Add docker-cli and docker-cli-compose for stack management (uses host's docker socket)
-# Add openssh-client for SSH key authentication with git repositories
-# Upgrade all packages to latest versions for security patches
-RUN apk upgrade --no-cache \
-    && apk add --no-cache curl git tini su-exec sqlite docker-cli docker-cli-compose openssh-client iproute2 \
-    && addgroup -g 1001 dockhand \
+# Set up environment variables
+ENV PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+    SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt \
+    NODE_ENV=production \
+    PORT=3000 \
+    HOST=0.0.0.0 \
+    DATA_DIR=/app/data \
+    HOME=/home/dockhand \
+    PUID=1001 \
+    PGID=1001
+
+# Create docker compose plugin symlink (we use `docker compose` syntax, Wolfi has standalone binary)
+RUN mkdir -p /usr/libexec/docker/cli-plugins \
+    && ln -s /usr/bin/docker-compose /usr/libexec/docker/cli-plugins/docker-compose
+
+# Create dockhand user and group (using busybox commands)
+RUN addgroup -g 1001 dockhand \
     && adduser -u 1001 -G dockhand -h /home/dockhand -D dockhand
 
-# Copy package files and install production dependencies
-# This is needed because svelte-adapter-bun externalizes some packages (croner, etc.)
-# that need to be available at runtime. Installing at build time is more reliable
-# than Bun's auto-install which requires network access and writable cache.
-COPY package.json bun.lock* ./
-RUN bun install --production --frozen-lockfile
-
-# Copy built application (Bun adapter output)
-COPY --from=builder /app/build ./build
-
-# Copy bundled subprocess scripts (built by scripts/build-subprocesses.ts)
-COPY --from=builder /app/build/subprocesses/ ./subprocesses/
+# Copy application files with correct ownership (avoids layer duplication from chown -R)
+COPY --from=app-builder --chown=dockhand:dockhand /app/node_modules ./node_modules
+COPY --from=app-builder --chown=dockhand:dockhand /app/package.json ./
+COPY --from=app-builder --chown=dockhand:dockhand /app/build ./build
+COPY --from=app-builder --chown=dockhand:dockhand /app/build/subprocesses/ ./subprocesses/
 
 # Copy database migrations
-COPY drizzle/ ./drizzle/
-COPY drizzle-pg/ ./drizzle-pg/
+COPY --chown=dockhand:dockhand drizzle/ ./drizzle/
+COPY --chown=dockhand:dockhand drizzle-pg/ ./drizzle-pg/
 
 # Copy legal documents
-COPY LICENSE.txt PRIVACY.txt ./
+COPY --chown=dockhand:dockhand LICENSE.txt PRIVACY.txt ./
 
-# Copy entrypoint script
+# Copy entrypoint script (root-owned, executable)
 COPY docker-entrypoint.sh /usr/local/bin/
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 
-# Copy emergency scripts (only the emergency subfolder, not license generation scripts)
-COPY scripts/emergency/ ./scripts/
+# Copy emergency scripts
+COPY --chown=dockhand:dockhand scripts/emergency/ ./scripts/
 RUN chmod +x ./scripts/*.sh ./scripts/**/*.sh 2>/dev/null || true
 
-# Create directories with proper ownership
+# Create data directories with correct ownership
 RUN mkdir -p /home/dockhand/.dockhand/stacks /app/data \
-    && chown -R dockhand:dockhand /app /home/dockhand
+    && chown dockhand:dockhand /app/data /home/dockhand /home/dockhand/.dockhand /home/dockhand/.dockhand/stacks
 
 EXPOSE 3000
 
-# Runtime configuration
-ENV NODE_ENV=production
-ENV PORT=3000
-ENV HOST=0.0.0.0
-ENV DATA_DIR=/app/data
-ENV HOME=/home/dockhand
-
-# User/group IDs - customize with -e PUID=1000 -e PGID=1000
-# The entrypoint will recreate the dockhand user with these IDs
-ENV PUID=1001
-ENV PGID=1001
-
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-  CMD curl -f http://localhost:3000/ || exit 1
+    CMD curl -f http://localhost:3000/ || exit 1
 
 ENTRYPOINT ["/sbin/tini", "--", "/usr/local/bin/docker-entrypoint.sh"]
 CMD ["bun", "run", "./build/index.js"]
