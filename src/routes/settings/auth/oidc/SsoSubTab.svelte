@@ -44,9 +44,9 @@
 		id: number;
 		name: string;
 		description?: string;
-		is_system: boolean;
+		isSystem: boolean;
 		permissions: any;
-		created_at: string;
+		createdAt: string;
 	}
 
 	interface Props {

@@ -19,9 +19,9 @@
 		name: string;
 		enabled: boolean;
 		config: any;
-		event_types: string[];
-		created_at: string;
-		updated_at: string;
+		eventTypes: string[];
+		createdAt: string;
+		updatedAt: string;
 	}
 
 	// Notification state

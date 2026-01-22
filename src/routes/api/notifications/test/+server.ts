@@ -40,9 +40,9 @@ export const POST: RequestHandler = async ({ request, cookies }) => {
 			type: data.type as 'smtp' | 'apprise',
 			enabled: true,
 			config: data.config,
-			event_types: [],
-			created_at: new Date().toISOString(),
-			updated_at: new Date().toISOString()
+			eventTypes: [],
+			createdAt: new Date().toISOString(),
+			updatedAt: new Date().toISOString()
 		};
 
 		const success = await testNotification(setting);

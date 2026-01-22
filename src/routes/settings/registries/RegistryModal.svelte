@@ -11,7 +11,7 @@
 		name: string;
 		url: string;
 		username?: string;
-		created_at: string;
+		createdAt: string;
 	}
 
 	interface Props {

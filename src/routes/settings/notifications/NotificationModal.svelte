@@ -24,7 +24,7 @@
 		enabled: boolean;
 		config: Record<string, any>;
 		eventTypes: string[];
-		created_at: string;
+		createdAt: string;
 	}
 
 	interface Props {

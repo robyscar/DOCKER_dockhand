@@ -14,10 +14,10 @@
 		id: number;
 		name: string;
 		description?: string;
-		is_system: boolean;
+		isSystem: boolean;
 		permissions: any;
 		environmentIds?: number[] | null;
-		created_at: string;
+		createdAt: string;
 	}
 
 	interface Environment {

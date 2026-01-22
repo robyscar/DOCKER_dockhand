@@ -20,8 +20,8 @@
 		username?: string;
 		hasCredentials: boolean;
 		isDefault: boolean;
-		created_at: string;
-		updated_at: string;
+		createdAt: string;
+		updatedAt: string;
 	}
 
 	// Check if a registry is Docker Hub
