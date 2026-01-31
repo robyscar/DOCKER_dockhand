@@ -155,6 +155,7 @@ export async function createEnvironment(env: Omit<Environment, 'id' | 'createdAt
 		tlsCa: env.tlsCa || null,
 		tlsCert: env.tlsCert || null,
 		tlsKey: encrypt(env.tlsKey) || null,
+		tlsSkipVerify: env.tlsSkipVerify ?? false,
 		icon: env.icon || 'globe',
 		socketPath: env.socketPath || '/var/run/docker.sock',
 		collectActivity: env.collectActivity !== false,
@@ -1149,7 +1150,11 @@ export async function updateAuthSettings(data: Partial<AuthSettingsData>): Promi
 	if (data.defaultProvider !== undefined) updateData.defaultProvider = data.defaultProvider;
 	if (data.sessionTimeout !== undefined) updateData.sessionTimeout = data.sessionTimeout;
 
-	await db.update(authSettings).set(updateData).where(eq(authSettings.id, 1));
+	// Get existing row's id (may not be 1 after db reset/migration)
+	const existing = await db.select({ id: authSettings.id }).from(authSettings).limit(1);
+	if (existing[0]) {
+		await db.update(authSettings).set(updateData).where(eq(authSettings.id, existing[0].id));
+	}
 	return getAuthSettings();
 }
 

@@ -1,5 +1,16 @@
 [
   {
+    "version": "1.0.14",
+    "date": "2026-01-31",
+    "changes": [
+      { "type": "fix", "text": "Fix environment variables in .env not interpolated during remote deployment" },
+      { "type": "fix", "text": "Fix stack variables not re-injected during stack start/stop" },
+      { "type": "fix", "text": "Fix time format 12/24 setting not respected in header clock" },
+      { "type": "fix", "text": "Fix skip TLS verification not saved on new environment" }
+    ],
+    "imageTag": "fnsys/dockhand:v1.0.14"
+  },
+  {
     "version": "1.0.13",
     "date": "2026-01-23",
     "changes": [
@@ -19,10 +30,11 @@
       { "type": "fix", "text": "Fix git stacks creating duplicate compose.yaml alongside repo file" },
       { "type": "fix", "text": "Fix env vars not showing after stack create" },
       { "type": "fix", "text": "Fix stack path defaults accidentally enforced over custom paths" },
-      { "type": "fix", "text": "Fix adopted stack save & restart breaking paths and env vars" }
+      { "type": "fix", "text": "Fix adopted stack save & restart breaking paths and env vars" },
+      { "type": "fix", "text": "Add more information to container audit logs including diff of changes" },
+      { "type": "fix", "text": "Preserve container settings on restart and auto-update" }
     ],
-    "imageTag": "fnsys/dockhand:v1.0.13",
-    "comingSoon": true
+    "imageTag": "fnsys/dockhand:v1.0.13"
   },
   {
     "version": "1.0.12",

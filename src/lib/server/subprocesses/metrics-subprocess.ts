@@ -20,12 +20,20 @@ const ENV_DISK_TIMEOUT = 20000; // 20 seconds timeout per environment for disk c
 
 /**
  * Timeout wrapper - returns fallback if promise takes too long
+ * IMPORTANT: Properly clears the timeout to prevent memory leaks
  */
 function withTimeout<T>(promise: Promise<T>, ms: number, fallback: T): Promise<T> {
-	return Promise.race([
-		promise,
-		new Promise<T>(resolve => setTimeout(() => resolve(fallback), ms))
-	]);
+	let timeoutId: ReturnType<typeof setTimeout> | null = null;
+
+	const timeoutPromise = new Promise<T>((resolve) => {
+		timeoutId = setTimeout(() => resolve(fallback), ms);
+	});
+
+	return Promise.race([promise, timeoutPromise]).finally(() => {
+		if (timeoutId !== null) {
+			clearTimeout(timeoutId);
+		}
+	});
 }
 
 // Track last disk warning sent per environment to avoid spamming
@@ -35,6 +43,8 @@ const DISK_WARNING_COOLDOWN = 3600000; // 1 hour between warnings
 let collectInterval: ReturnType<typeof setInterval> | null = null;
 let diskCheckInterval: ReturnType<typeof setInterval> | null = null;
 let isShuttingDown = false;
+let collectionCycleCount = 0;
+const MEMORY_LOG_INTERVAL = 10; // Log memory every 10 cycles (~5 minutes at 30s interval)
 
 /**
  * Send message to main process
@@ -170,6 +180,15 @@ async function collectMetrics() {
 				console.warn(`[MetricsSubprocess] Environment "${enabledEnvs[index].name}" metrics failed: ${reason}`);
 			}
 		});
+
+		// Periodic memory logging for diagnostics
+		collectionCycleCount++;
+		if (collectionCycleCount % MEMORY_LOG_INTERVAL === 0) {
+			const memUsage = process.memoryUsage();
+			const heapMB = Math.round(memUsage.heapUsed / 1024 / 1024);
+			const rssMB = Math.round(memUsage.rss / 1024 / 1024);
+			console.log(`[MetricsSubprocess] Memory: heap=${heapMB}MB, rss=${rssMB}MB (cycle ${collectionCycleCount})`);
+		}
 	} catch (error) {
 		const message = error instanceof Error ? error.message : String(error);
 		console.error(`[MetricsSubprocess] Metrics collection error: ${message}`);
@@ -431,6 +450,15 @@ async function start(): Promise<void> {
 	} else {
 		console.log('[MetricsSubprocess] Disk space monitoring disabled (SKIP_DF_COLLECTION=true)');
 	}
+
+	// Start memory diagnostics logging (every 5 minutes)
+	setInterval(() => {
+		const mem = process.memoryUsage();
+		console.log(
+			`[MetricsSubprocess] Memory: heap=${Math.round(mem.heapUsed / 1024 / 1024)}MB, ` +
+			`rss=${Math.round(mem.rss / 1024 / 1024)}MB`
+		);
+	}, 5 * 60 * 1000);
 
 	// Listen for commands from main process
 	process.on('message', (message: MainProcessCommand) => {

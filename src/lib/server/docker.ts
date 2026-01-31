@@ -3097,17 +3097,42 @@ export async function runContainerWithStreaming(options: {
 		// Wait for container to fully exit before fetching stdout
 		// The stderr stream may close before the container finishes writing to stdout
 		// Use a timeout to prevent hanging if something goes wrong (container should already be exited)
-		const waitPromise = dockerFetch(`/containers/${containerId}/wait`, { method: 'POST' }, options.envId);
-		const timeoutPromise = new Promise((_, reject) =>
-			setTimeout(() => reject(new Error('Container wait timeout after 10s')), 10000)
-		);
-		await Promise.race([waitPromise, timeoutPromise]).catch((err) => {
+		let exitCode: number | undefined;
+		try {
+			const waitPromise = dockerFetch(`/containers/${containerId}/wait`, { method: 'POST' }, options.envId);
+			const timeoutPromise = new Promise<never>((_, reject) =>
+				setTimeout(() => reject(new Error('Container wait timeout after 10s')), 10000)
+			);
+			const waitResult = await Promise.race([waitPromise, timeoutPromise]);
+			const waitData = await waitResult.json() as { StatusCode?: number };
+			exitCode = waitData.StatusCode;
+			console.log(`[runContainerWithStreaming] Container exited with code: ${exitCode}`);
+		} catch (err) {
 			// Log but don't fail - container might already be gone or stderr stream was reliable
-			console.warn(`[runContainerWithStreaming] Wait warning: ${err.message}`);
-		});
+			console.warn(`[runContainerWithStreaming] Wait warning: ${(err as Error).message}`);
+		}
 
 		// Container has exited. Now fetch stdout reliably (no race condition).
 		const stdout = await fetchContainerStdout(containerId, config, options.envId);
+
+		// If stdout is empty and exit code is non-zero, fetch stderr for debugging
+		if (stdout.length === 0 && exitCode !== 0) {
+			try {
+				const stderrResponse = await dockerFetch(
+					`/containers/${containerId}/logs?stdout=false&stderr=true&follow=false`,
+					{},
+					options.envId
+				);
+				const stderrBuffer = Buffer.from(await stderrResponse.arrayBuffer());
+				const stderrResult = processStreamFrames(stderrBuffer, undefined, undefined);
+				if (stderrResult.stderr) {
+					console.error(`[runContainerWithStreaming] Container stderr: ${stderrResult.stderr.substring(0, 1000)}`);
+				}
+			} catch {
+				// Ignore stderr fetch errors
+			}
+		}
+
 		return stdout;
 	} finally {
 		// Always cleanup container

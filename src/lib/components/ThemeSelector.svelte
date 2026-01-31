@@ -8,19 +8,6 @@
 
 	// Preload all monospace Google Fonts so dropdown previews render correctly
 	let monoFontsLoaded = $state(false);
-	onMount(() => {
-		const fontsToLoad = monospaceFonts.filter(f => f.googleFont);
-		if (fontsToLoad.length === 0) {
-			monoFontsLoaded = true;
-			return;
-		}
-		const families = fontsToLoad.map(f => `family=${f.googleFont}`).join('&');
-		const link = document.createElement('link');
-		link.rel = 'stylesheet';
-		link.href = `https://fonts.googleapis.com/css2?${families}&display=swap`;
-		link.onload = () => { monoFontsLoaded = true; };
-		document.head.appendChild(link);
-	});
 
 	// Font size options
 	const fontSizes: { id: FontSize; name: string }[] = [
@@ -38,66 +25,116 @@
 
 	let { userId }: Props = $props();
 
-	// Local state bound to selects
-	let selectedLightTheme = $state($themeStore.lightTheme);
-	let selectedDarkTheme = $state($themeStore.darkTheme);
-	let selectedFont = $state($themeStore.font);
-	let selectedFontSize = $state($themeStore.fontSize);
-	let selectedGridFontSize = $state($themeStore.gridFontSize);
-	let selectedTerminalFont = $state($themeStore.terminalFont);
-	let selectedEditorFont = $state($themeStore.editorFont);
+	// When editing global settings (no userId), skip applying theme visually
+	// This prevents global theme changes from affecting the current user's session
+	const skipApply = !userId;
 
-	// Sync local state with store changes
+	// Local state bound to selects - initialized with defaults, will be populated on mount
+	let selectedLightTheme = $state('default');
+	let selectedDarkTheme = $state('default');
+	let selectedFont = $state('system');
+	let selectedFontSize = $state<FontSize>('normal');
+	let selectedGridFontSize = $state<FontSize>('normal');
+	let selectedTerminalFont = $state('system-mono');
+	let selectedEditorFont = $state('system-mono');
+
+	onMount(async () => {
+		// Load monospace fonts for dropdown previews
+		const fontsToLoad = monospaceFonts.filter(f => f.googleFont);
+		if (fontsToLoad.length > 0) {
+			const families = fontsToLoad.map(f => `family=${f.googleFont}`).join('&');
+			const link = document.createElement('link');
+			link.rel = 'stylesheet';
+			link.href = `https://fonts.googleapis.com/css2?${families}&display=swap`;
+			link.onload = () => { monoFontsLoaded = true; };
+			document.head.appendChild(link);
+		} else {
+			monoFontsLoaded = true;
+		}
+
+		// Fetch settings from the appropriate source
+		if (userId) {
+			// User profile: sync with themeStore (which has user's preferences)
+			selectedLightTheme = $themeStore.lightTheme;
+			selectedDarkTheme = $themeStore.darkTheme;
+			selectedFont = $themeStore.font;
+			selectedFontSize = $themeStore.fontSize;
+			selectedGridFontSize = $themeStore.gridFontSize;
+			selectedTerminalFont = $themeStore.terminalFont;
+			selectedEditorFont = $themeStore.editorFont;
+		} else {
+			// Global settings: fetch directly from API
+			try {
+				const res = await fetch('/api/settings/theme');
+				if (res.ok) {
+					const data = await res.json();
+					selectedLightTheme = data.lightTheme || 'default';
+					selectedDarkTheme = data.darkTheme || 'default';
+					selectedFont = data.font || 'system';
+					selectedFontSize = data.fontSize || 'normal';
+					selectedGridFontSize = data.gridFontSize || 'normal';
+					selectedTerminalFont = data.terminalFont || 'system-mono';
+					selectedEditorFont = data.editorFont || 'system-mono';
+				}
+			} catch {
+				// Use defaults on error
+			}
+		}
+	});
+
+	// Sync with themeStore changes only when editing user profile
 	$effect(() => {
-		selectedLightTheme = $themeStore.lightTheme;
-		selectedDarkTheme = $themeStore.darkTheme;
-		selectedFont = $themeStore.font;
-		selectedFontSize = $themeStore.fontSize;
-		selectedGridFontSize = $themeStore.gridFontSize;
-		selectedTerminalFont = $themeStore.terminalFont;
-		selectedEditorFont = $themeStore.editorFont;
+		if (userId) {
+			selectedLightTheme = $themeStore.lightTheme;
+			selectedDarkTheme = $themeStore.darkTheme;
+			selectedFont = $themeStore.font;
+			selectedFontSize = $themeStore.fontSize;
+			selectedGridFontSize = $themeStore.gridFontSize;
+			selectedTerminalFont = $themeStore.terminalFont;
+			selectedEditorFont = $themeStore.editorFont;
+		}
 	});
 
 	async function handleLightThemeChange(value: string | undefined) {
 		if (!value) return;
 		selectedLightTheme = value;
-		await themeStore.setPreference('lightTheme', value, userId);
+		await themeStore.setPreference('lightTheme', value, userId, skipApply);
 	}
 
 	async function handleDarkThemeChange(value: string | undefined) {
 		if (!value) return;
 		selectedDarkTheme = value;
-		await themeStore.setPreference('darkTheme', value, userId);
+		await themeStore.setPreference('darkTheme', value, userId, skipApply);
 	}
 
 	async function handleFontChange(value: string | undefined) {
 		if (!value) return;
 		selectedFont = value;
-		await themeStore.setPreference('font', value, userId);
+		await themeStore.setPreference('font', value, userId, skipApply);
 	}
 
 	async function handleFontSizeChange(value: string | undefined) {
 		if (!value) return;
 		selectedFontSize = value as FontSize;
-		await themeStore.setPreference('fontSize', value as FontSize, userId);
+		await themeStore.setPreference('fontSize', value as FontSize, userId, skipApply);
 	}
 
 	async function handleGridFontSizeChange(value: string | undefined) {
 		if (!value) return;
 		selectedGridFontSize = value as FontSize;
-		await themeStore.setPreference('gridFontSize', value as FontSize, userId);
+		await themeStore.setPreference('gridFontSize', value as FontSize, userId, skipApply);
 	}
 
 	async function handleTerminalFontChange(value: string | undefined) {
 		if (!value) return;
 		selectedTerminalFont = value;
-		await themeStore.setPreference('terminalFont', value, userId);
+		await themeStore.setPreference('terminalFont', value, userId, skipApply);
 	}
 
 	async function handleEditorFontChange(value: string | undefined) {
 		if (!value) return;
 		selectedEditorFont = value;
-		await themeStore.setPreference('editorFont', value, userId);
+		await themeStore.setPreference('editorFont', value, userId, skipApply);
 	}
 
 </script>

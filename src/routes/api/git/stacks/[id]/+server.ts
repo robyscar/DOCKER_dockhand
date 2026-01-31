@@ -1,6 +1,6 @@
 import { json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
-import { getGitStack, updateGitStack, deleteGitStack, deleteStackSource, updateStackSourceName, updateStackEnvVarsName, setStackEnvVars } from '$lib/server/db';
+import { getGitStack, updateGitStack, deleteGitStack, deleteStackSource, updateStackSourceName, updateStackEnvVarsName, setStackEnvVars, getStackEnvVars } from '$lib/server/db';
 import { deleteGitStackFiles, deployGitStack } from '$lib/server/git';
 import { authorize } from '$lib/server/authorize';
 import { registerSchedule, unregisterSchedule } from '$lib/server/scheduler';
@@ -99,15 +99,36 @@ export const PUT: RequestHandler = async (event) => {
 		if (data.envVars && Array.isArray(data.envVars)) {
 			const stackName = data.stackName || existing.stackName;
 			const envId = updated.environmentId ?? null;
-			await setStackEnvVars(
-				stackName,
-				envId,
-				data.envVars.filter((v: any) => v.key?.trim()).map((v: any) => ({
-					key: v.key.trim(),
-					value: v.value ?? '',
-					isSecret: v.isSecret ?? false
-				}))
-			);
+
+			// Get existing secrets to preserve masked values
+			const existingVars = await getStackEnvVars(stackName, envId, false); // false = unmasked
+			const existingByKey = new Map(existingVars.map(v => [v.key, v]));
+
+			const varsToSave = data.envVars
+				.filter((v: any) => v.key?.trim())
+				.map((v: any) => {
+					// Preserve existing secret value if submitted value is masked
+					if (v.isSecret && v.value === '***') {
+						const existingVar = existingByKey.get(v.key.trim());
+						if (existingVar && existingVar.isSecret) {
+							return {
+								key: v.key.trim(),
+								value: existingVar.value, // Use real value from DB
+								isSecret: true
+							};
+						}
+						// No existing secret found - skip this entry (shouldn't happen normally)
+						return null;
+					}
+					return {
+						key: v.key.trim(),
+						value: v.value ?? '',
+						isSecret: v.isSecret ?? false
+					};
+				})
+				.filter(Boolean); // Remove nulls
+
+			await setStackEnvVars(stackName, envId, varsToSave as any);
 		}
 
 		// If deployNow is set, deploy after saving

@@ -113,18 +113,22 @@ function createThemeStore() {
 			}
 		},
 
-		// Update a preference and apply immediately
+		// Update a preference and optionally apply immediately
+		// skipApply: when true, saves to database but doesn't apply visually (for global settings when user is logged in)
 		async setPreference<K extends keyof ThemePreferences>(
 			key: K,
 			value: ThemePreferences[K],
-			userId?: number
+			userId?: number,
+			skipApply?: boolean
 		) {
-			update((prefs) => {
-				const newPrefs = { ...prefs, [key]: value };
-				saveToStorage(newPrefs);
-				applyTheme(newPrefs);
-				return newPrefs;
-			});
+			if (!skipApply) {
+				update((prefs) => {
+					const newPrefs = { ...prefs, [key]: value };
+					saveToStorage(newPrefs);
+					applyTheme(newPrefs);
+					return newPrefs;
+				});
+			}
 
 			// Save to database (async, non-blocking)
 			try {

@@ -1097,13 +1097,17 @@ export async function deployGitStackWithProgress(
 		});
 
 		if (result.success) {
-			// Record the stack source
+			// Record the stack source with resolved compose path for consistency
+			const stackDir = await getStackDir(gitStack.stackName, gitStack.environmentId);
+			const resolvedComposePath = join(stackDir, basename(gitStack.composePath));
+
 			await upsertStackSource({
 				stackName: gitStack.stackName,
 				environmentId: gitStack.environmentId,
 				sourceType: 'git',
 				gitRepositoryId: gitStack.repositoryId,
-				gitStackId: stackId
+				gitStackId: stackId,
+				composePath: resolvedComposePath
 			});
 
 			onProgress({ status: 'complete', message: `Successfully deployed ${gitStack.stackName}` });

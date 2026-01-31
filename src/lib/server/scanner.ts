@@ -76,6 +76,10 @@ const SCANNER_CACHE_DIR = 'scanner-cache';
 // Track running scanner instances to detect concurrent scans
 const runningScanners = new Map<string, number>(); // key: "grype" or "trivy", value: count
 
+// Track in-progress scans per image to prevent duplicate scans
+// Key: "{scannerType}:{imageName}", Value: Promise that resolves to the scan result
+const inProgressScans = new Map<string, Promise<string>>();
+
 // Default CLI arguments for scanners (image name is substituted for {image})
 export const DEFAULT_GRYPE_ARGS = '-o json -v {image}';
 export const DEFAULT_TRIVY_ARGS = 'image --format json {image}';
@@ -434,6 +438,38 @@ async function runScannerContainer(
 	envId?: number,
 	onOutput?: (line: string) => void
 ): Promise<string> {
+	// Check if a scan for this exact image is already in progress
+	// This prevents duplicate scans when multiple containers use the same image
+	const scanKey = `${scannerType}:${imageName}:${envId ?? 'local'}`;
+	const existingScan = inProgressScans.get(scanKey);
+	if (existingScan) {
+		console.log(`[Scanner] Reusing in-progress ${scannerType} scan for: ${imageName}`);
+		return existingScan;
+	}
+
+	// Create the actual scan promise
+	const scanPromise = runScannerContainerImpl(scannerImage, scannerType, imageName, cmd, envId, onOutput);
+
+	// Register it so concurrent requests can reuse it
+	inProgressScans.set(scanKey, scanPromise);
+
+	try {
+		return await scanPromise;
+	} finally {
+		// Clean up the tracking entry when done
+		inProgressScans.delete(scanKey);
+	}
+}
+
+// Internal implementation of scanner container run
+async function runScannerContainerImpl(
+	scannerImage: string,
+	scannerType: 'grype' | 'trivy',
+	imageName: string,
+	cmd: string[],
+	envId?: number,
+	onOutput?: (line: string) => void
+): Promise<string> {
 	console.log(`[Scanner] Starting ${scannerType} scan for image: ${imageName}, envId: ${envId ?? 'local'}`);
 
 	// Check if another scanner of the same type is already running
@@ -451,17 +487,25 @@ async function runScannerContainer(
 
 	// Detect the host Docker socket path based on connection type
 	// For local socket environments, detect the actual host socket path (handles rootless Docker)
-	// For remote environments (hawser/direct), scanner runs remotely and uses standard path
+	// For remote environments (hawser/direct with host), scanner runs remotely and uses standard path
 	const env = envId ? await getEnvironment(envId) : undefined;
 	const connectionType = env?.connectionType;
+
+	// Determine if this is a local socket environment:
+	// - connectionType === 'socket' (explicit)
+	// - connectionType is null/undefined (default behavior)
+	// - connectionType === 'direct' but no host specified (legacy local environments)
+	const isLocalSocket = !connectionType ||
+		connectionType === 'socket' ||
+		(connectionType === 'direct' && !env?.host);
 
 	let hostSocketPath: string;
 	let containerUser: string | undefined;
 
-	if (!connectionType || connectionType === 'socket') {
+	if (isLocalSocket) {
 		// Local socket environment - detect host socket path (handles rootless Docker)
 		hostSocketPath = getHostDockerSocket();
-		console.log(`[Scanner] Local socket scan - detected host Docker socket: ${hostSocketPath}`);
+		console.log(`[Scanner] Local socket scan (${connectionType || 'default'}) - detected host Docker socket: ${hostSocketPath}`);
 
 		// For user-specific Docker sockets, run scanner as that user
 		// e.g., /run/user/1000/docker.sock -> run as UID 1000
@@ -471,10 +515,10 @@ async function runScannerContainer(
 			console.log(`[Scanner] Rootless Docker detected (UID ${containerUser})`);
 		}
 	} else {
-		// Remote environment (direct/hawser-standard/hawser-edge)
+		// Remote environment (direct with host/hawser-standard/hawser-edge)
 		// Scanner runs on remote host, uses remote host's standard Docker socket
 		hostSocketPath = '/var/run/docker.sock';
-		console.log(`[Scanner] Remote scan (${connectionType}) - using standard socket path: ${hostSocketPath}`);
+		console.log(`[Scanner] Remote scan (${connectionType}, host: ${env?.host}) - using standard socket path: ${hostSocketPath}`);
 	}
 
 	// Determine cache storage strategy based on environment

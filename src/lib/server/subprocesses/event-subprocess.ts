@@ -31,7 +31,8 @@ const lastPollTime: Map<number, number> = new Map();
 // Recent event cache for deduplication (key: timeNano-containerId-action)
 const recentEvents: Map<string, number> = new Map();
 const DEDUP_WINDOW_MS = 5000; // 5 second window for deduplication
-const CACHE_CLEANUP_INTERVAL_MS = 30000; // Clean up cache every 30 seconds
+const CACHE_CLEANUP_INTERVAL_MS = 5000; // Clean up cache every 5 seconds (match dedup window)
+const MAX_DEDUP_CACHE_SIZE = 500; // Hard limit to prevent unbounded growth
 
 let cacheCleanupInterval: ReturnType<typeof setInterval> | null = null;
 let isShuttingDown = false;
@@ -126,11 +127,22 @@ interface DockerEvent {
 
 /**
  * Clean up old entries from the deduplication cache
+ * Also enforces max size limit with LRU eviction
  */
 function cleanupRecentEvents() {
 	const now = Date.now();
+	// First pass: remove expired entries
 	for (const [key, timestamp] of recentEvents.entries()) {
 		if (now - timestamp > DEDUP_WINDOW_MS) {
+			recentEvents.delete(key);
+		}
+	}
+	// Second pass: enforce max size with LRU eviction if still too large
+	if (recentEvents.size > MAX_DEDUP_CACHE_SIZE) {
+		const entries = Array.from(recentEvents.entries())
+			.sort((a, b) => a[1] - b[1]); // Sort by timestamp (oldest first)
+		const toRemove = entries.slice(0, entries.length - MAX_DEDUP_CACHE_SIZE);
+		for (const [key] of toRemove) {
 			recentEvents.delete(key);
 		}
 	}
@@ -274,9 +286,11 @@ async function pollEnvironmentEvents(envId: number, envName: string) {
 			}
 		} finally {
 			try {
+				// Cancel the stream first to ensure proper cleanup, then release lock
+				await reader.cancel();
 				reader.releaseLock();
 			} catch {
-				// Reader already released
+				// Reader already released or stream closed
 			}
 		}
 
@@ -362,6 +376,8 @@ async function startEnvironmentCollector(envId: number, envName: string) {
 			} finally {
 				if (reader) {
 					try {
+						// Cancel the stream first to ensure proper cleanup, then release lock
+						await reader.cancel();
 						reader.releaseLock();
 					} catch {
 						// Reader already released or stream closed - ignore
@@ -376,6 +392,8 @@ async function startEnvironmentCollector(envId: number, envName: string) {
 		} catch (error: any) {
 			if (reader) {
 				try {
+					// Cancel the stream first to ensure proper cleanup, then release lock
+					await reader.cancel();
 					reader.releaseLock();
 				} catch {
 					// Reader already released or stream closed - ignore
@@ -624,7 +642,17 @@ async function start(): Promise<void> {
 
 	// Start periodic cache cleanup
 	cacheCleanupInterval = setInterval(cleanupRecentEvents, CACHE_CLEANUP_INTERVAL_MS);
-	console.log('[EventSubprocess] Started deduplication cache cleanup (every 30s)');
+	console.log('[EventSubprocess] Started deduplication cache cleanup (every 5s)');
+
+	// Start memory diagnostics logging (every 5 minutes)
+	setInterval(() => {
+		const mem = process.memoryUsage();
+		console.log(
+			`[EventSubprocess] Memory: heap=${Math.round(mem.heapUsed / 1024 / 1024)}MB, ` +
+			`rss=${Math.round(mem.rss / 1024 / 1024)}MB, ` +
+			`dedup=${recentEvents.size}, collectors=${collectors.size}, pollers=${pollIntervals.size}`
+		);
+	}, 5 * 60 * 1000);
 
 	// Listen for commands from main process
 	process.on('message', (message: MainProcessCommand) => {

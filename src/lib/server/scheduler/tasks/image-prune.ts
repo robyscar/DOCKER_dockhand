@@ -74,7 +74,12 @@ export async function runImagePrune(
 
 		// Extract space reclaimed and images removed from result
 		const spaceReclaimed = result?.SpaceReclaimed || 0;
-		const imagesRemoved = result?.ImagesDeleted?.length || 0;
+		// Count unique images by filtering Untagged entries that are not digest references
+		// Docker returns multiple entries per image: Untagged (tag), Untagged (digest @sha256:), Deleted (layers)
+		// We only count tag-based Untagged entries to get actual image count
+		const imagesRemoved = result?.ImagesDeleted
+			?.filter((img: any) => img.Untagged && !img.Untagged.includes('@sha256:'))
+			.length || 0;
 
 		// Format space for human-readable output
 		const formatBytes = (bytes: number): string => {

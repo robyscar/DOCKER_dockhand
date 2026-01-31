@@ -75,7 +75,7 @@
 		applyTheme(themeStore.get());
 
 		// Initialize theme from app settings (no user yet, so fetches from /api/settings/theme)
-		themeStore.init();
+		await themeStore.init();
 
 		// Set error from URL if present
 		if (urlError) {

@@ -140,15 +140,20 @@ export const POST: RequestHandler = async (event) => {
 
 		// Save environment variable overrides before deploying
 		if (data.envVars && Array.isArray(data.envVars) && data.envVars.length > 0) {
-			await setStackEnvVars(
-				trimmedStackName,
-				data.environmentId || null,
-				data.envVars.filter((v: any) => v.key?.trim()).map((v: any) => ({
+			// Filter out masked secrets - on initial creation there are no existing secrets
+			// If a secret has value '***', it means something went wrong in the UI
+			const varsToSave = data.envVars
+				.filter((v: any) => v.key?.trim())
+				.filter((v: any) => !(v.isSecret && v.value === '***'))
+				.map((v: any) => ({
 					key: v.key.trim(),
 					value: v.value ?? '',
 					isSecret: v.isSecret ?? false
-				}))
-			);
+				}));
+
+			if (varsToSave.length > 0) {
+				await setStackEnvVars(trimmedStackName, data.environmentId || null, varsToSave);
+			}
 		}
 
 		// If deployNow is set, deploy immediately

@@ -25,7 +25,7 @@ import {
 	getAutoUpdateSetting
 } from './db';
 import { unregisterSchedule } from './scheduler';
-import { deleteGitStackFiles } from './git';
+import { deleteGitStackFiles, parseEnvFileContent } from './git';
 import { cleanPem } from '$lib/utils/pem';
 import { rewriteComposeVolumePaths, getHostDataDir } from './host-path';
 
@@ -1225,18 +1225,35 @@ async function executeComposeCommand(
 
 	switch (env.connectionType) {
 		case 'hawser-standard':
-		case 'hawser-edge':
+		case 'hawser-edge': {
+			// For Hawser deployments, we need to read the .env file and send variables via envVars
+			// because Docker Compose on the remote host may not auto-read the .env file reliably.
+			// Local deployments use --env-file flag, but Hawser needs variables injected via shell env.
+			let hawserEnvVars = envVars;
+			if (envPath && existsSync(envPath)) {
+				try {
+					const envFileContent = await Bun.file(envPath).text();
+					const envFileVars = parseEnvFileContent(envFileContent, stackName);
+					// Merge: envFileVars (lowest) < envVars (DB overrides)
+					// secretVars are handled separately in executeComposeViaHawser
+					hawserEnvVars = { ...envFileVars, ...(envVars || {}) };
+					console.log(`[Stack:${stackName}] Read ${Object.keys(envFileVars).length} vars from .env file for Hawser injection`);
+				} catch (err) {
+					console.warn(`[Stack:${stackName}] Failed to read .env file at ${envPath}:`, err);
+				}
+			}
 			return executeComposeViaHawser(
 				operation,
 				stackName,
 				composeContent,
 				envId!,
-				envVars,
+				hawserEnvVars,
 				secretVars,
 				forceRecreate,
 				removeVolumes,
 				stackFiles
 			);
+		}
 
 		case 'direct': {
 			const port = env.port || 2375;
@@ -1490,6 +1507,8 @@ export interface RequireComposeResult {
 	success: boolean;
 	content?: string;
 	secretVars?: Record<string, string>;
+	/** Non-secret variables from database (needed for compose interpolation) */
+	nonSecretVars?: Record<string, string>;
 	needsFileLocation?: boolean;
 	error?: string;
 	/** Directory containing the compose file (for working directory) */
@@ -1534,6 +1553,10 @@ async function requireComposeFile(
 	// These are NEVER written to disk
 	const secretVars = await getSecretEnvVarsAsRecord(stackName, envId);
 
+	// Get NON-SECRET variables from database (needed for compose interpolation)
+	// For git stacks without .env files, these are the only source of env vars
+	const nonSecretVars = await getNonSecretEnvVarsAsRecord(stackName, envId);
+
 	// Determine env file path for --env-file flag
 	// For stacks with custom composePath (adopted/external), derive envPath from same directory
 	// For internal stacks, use the default data directory
@@ -1558,11 +1581,13 @@ async function requireComposeFile(
 	}
 
 	// Docker Compose reads non-secrets from the .env file via --env-file.
-	// Only secrets need to be injected via shell environment.
+	// Secrets and non-secrets from DB need to be injected via shell environment
+	// for stacks without .env files (e.g., git stacks with manual env vars).
 	return {
 		success: true,
 		content: composeResult.content!,
 		secretVars,
+		nonSecretVars,
 		stackDir: composeResult.stackDir,
 		composePath: composeResult.composePath ?? undefined,
 		envPath: envFilePath ?? undefined
@@ -1588,7 +1613,7 @@ export async function startStack(
 		'up',
 		{ stackName, envId, workingDir: result.stackDir, composePath: result.composePath, envPath: result.envPath },
 		result.content!,
-		undefined,
+		result.nonSecretVars,
 		result.secretVars
 	);
 }
@@ -1612,7 +1637,7 @@ export async function stopStack(
 		'stop',
 		{ stackName, envId, workingDir: result.stackDir, composePath: result.composePath, envPath: result.envPath },
 		result.content!,
-		undefined,
+		result.nonSecretVars,
 		result.secretVars
 	);
 }
@@ -1636,7 +1661,7 @@ export async function restartStack(
 		'restart',
 		{ stackName, envId, workingDir: result.stackDir, composePath: result.composePath, envPath: result.envPath },
 		result.content!,
-		undefined,
+		result.nonSecretVars,
 		result.secretVars
 	);
 }
@@ -1661,7 +1686,7 @@ export async function downStack(
 		'down',
 		{ stackName, envId, removeVolumes, workingDir: result.stackDir, composePath: result.composePath, envPath: result.envPath },
 		result.content!,
-		undefined,
+		result.nonSecretVars,
 		result.secretVars
 	);
 }
@@ -2026,7 +2051,7 @@ export async function pullStackImages(
 		'pull',
 		{ stackName, envId, workingDir: result.stackDir, composePath: result.composePath, envPath: result.envPath },
 		result.content!,
-		undefined,
+		result.nonSecretVars,
 		result.secretVars
 	);
 }
