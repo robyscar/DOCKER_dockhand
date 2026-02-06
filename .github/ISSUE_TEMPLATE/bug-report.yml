@@ -71,7 +71,7 @@ body:
       description: How you connect your Docker host to Dockhand
       placeholder: socket/direct IP/hawser/hawser-edge
     validations:
-      required: false
+      required: true
   - type: checkboxes
     id: required-checks
     attributes:
