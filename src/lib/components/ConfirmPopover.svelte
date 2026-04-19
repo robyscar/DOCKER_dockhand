@@ -19,6 +19,7 @@
 		onConfirm: () => void;
 		onOpenChange: (open: boolean) => void;
 		children: Snippet<[{ open: boolean }]>;
+		extraContent?: Snippet;
 	}
 
 	let {
@@ -35,7 +36,8 @@
 		disabled = false,
 		onConfirm,
 		onOpenChange,
-		children
+		children,
+		extraContent
 	}: Props = $props();
 
 	const triggerClass = $derived(unstyled
@@ -103,11 +105,16 @@
 		align={position === 'left' ? 'start' : 'end'}
 		sideOffset={8}
 	>
-		<div class="flex items-center gap-2">
-			<span class="text-xs whitespace-nowrap">{action} {itemType} {#if displayName}<strong>{displayName}</strong>{/if}?</span>
-			<Button size="sm" {variant} class="h-6 px-2 text-xs" onclick={handleConfirm}>
-				{confirmText}
-			</Button>
+		<div class="flex flex-col gap-1.5">
+			<div class="flex items-center gap-2">
+				<span class="text-xs whitespace-nowrap">{action} {itemType} {#if displayName}<strong>{displayName}</strong>{/if}?</span>
+				<Button size="sm" {variant} class="h-6 px-2 text-xs" onclick={handleConfirm}>
+					{confirmText}
+				</Button>
+			</div>
+			{#if extraContent}
+				{@render extraContent()}
+			{/if}
 		</div>
 	</Popover.Content>
 </Popover.Root>

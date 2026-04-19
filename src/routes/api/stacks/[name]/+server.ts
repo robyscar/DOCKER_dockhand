@@ -9,6 +9,7 @@ export const DELETE: RequestHandler = async (event) => {
 	const auth = await authorize(cookies);
 
 	const force = url.searchParams.get('force') === 'true';
+	const volumes = url.searchParams.get('volumes') === 'true';
 	const envId = url.searchParams.get('env');
 	const envIdNum = envId ? parseInt(envId) : undefined;
 
@@ -24,10 +25,10 @@ export const DELETE: RequestHandler = async (event) => {
 
 	try {
 		const stackName = decodeURIComponent(params.name);
-		const result = await removeStack(stackName, envIdNum, force);
+		const result = await removeStack(stackName, envIdNum, force, volumes);
 
 		// Audit log
-		await auditStack(event, 'delete', stackName, envIdNum, { force });
+		await auditStack(event, 'delete', stackName, envIdNum, { force, volumes });
 
 		if (!result.success) {
 			return json({ success: false, error: result.error }, { status: 400 });

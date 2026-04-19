@@ -1982,7 +1982,8 @@ export async function downStack(
 export async function removeStack(
 	stackName: string,
 	envId?: number | null,
-	force = false
+	force = false,
+	removeVolumes = false
 ): Promise<StackOperationResult> {
 	return withStackLock(stackName, async () => {
 		// Get compose file (may not exist for external stacks)
@@ -2000,6 +2001,7 @@ export async function removeStack(
 				{
 					stackName,
 					envId,
+					removeVolumes,
 					workingDir: composeResult.stackDir,
 					composePath: composeResult.composePath ?? undefined,
 					envPath: composeResult.envPath ?? undefined

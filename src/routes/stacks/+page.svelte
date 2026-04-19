@@ -10,6 +10,7 @@
 	import { Badge } from '$lib/components/ui/badge';
 	import { Button } from '$lib/components/ui/button';
 	import { Input } from '$lib/components/ui/input';
+	import { Checkbox } from '$lib/components/ui/checkbox';
 	import * as Tooltip from '$lib/components/ui/tooltip';
 	import * as Popover from '$lib/components/ui/popover';
 	import MultiSelectFilter from '$lib/components/MultiSelectFilter.svelte';
@@ -418,6 +419,7 @@
 	let confirmDeleteName = $state<string | null>(null);
 	let confirmStopName = $state<string | null>(null);
 	let confirmDownName = $state<string | null>(null);
+	let deleteVolumes = $state(false);
 
 	// Stack operation loading state
 	let stackActionLoading = $state<string | null>(null);
@@ -968,15 +970,18 @@
 
 	async function removeStack(name: string) {
 		operationError = null;
+		const withVolumes = deleteVolumes;
+		deleteVolumes = false;
 		try {
-			const response = await fetch(appendEnvParam(`/api/stacks/${encodeURIComponent(name)}?force=true`, envId), { method: 'DELETE' });
+			const params = `force=true${withVolumes ? '&volumes=true' : ''}`;
+			const response = await fetch(appendEnvParam(`/api/stacks/${encodeURIComponent(name)}?${params}`, envId), { method: 'DELETE' });
 			if (!response.ok) {
 				const data = await response.json();
 				const errorMsg = data.error || 'Failed to remove stack';
 				showErrorDialog(`Failed to remove ${name}`, errorMsg);
 				return;
 			}
-			toast.success(`Removed ${name}`);
+			toast.success(`Removed ${name}${withVolumes ? ' (volumes deleted)' : ''}`);
 			await fetchStacks();
 		} catch (error) {
 			console.error('Failed to remove stack:', error);
@@ -1505,7 +1510,7 @@
 						<button
 							type="button"
 							class="font-medium text-xs hover:text-primary hover:underline cursor-pointer text-left"
-							onclick={() => editStack(stack.name)}
+							onclick={(e) => { e.stopPropagation(); editStack(stack.name); }}
 						>
 							{stack.name}
 						</button>
@@ -1648,7 +1653,7 @@
 					{@const stats = getStackStats(stack)}
 					<div class="text-right">
 						{#if stats}
-							<span class="text-xs font-mono text-muted-foreground" title="{formatBytes(stats.memoryUsage)} / {formatBytes(stats.memoryLimit)}">{formatBytes(stats.memoryUsage)}</span>
+							<span class="text-xs font-mono text-muted-foreground" title="{formatBytes(stats.memoryUsage)} / {formatBytes(stats.memoryLimit)}">{formatBytes(stats.memoryUsage)}<span class="text-muted-foreground/50">/{formatBytes(stats.memoryLimit, 0)}</span></span>
 						{:else if stack.status === 'running' || stack.status === 'partial' || stack.status === 'restarting'}
 							<span class="text-xs text-muted-foreground/50">...</span>
 						{:else}
@@ -1753,7 +1758,7 @@
 								{#if source.sourceType === 'git' && source.gitStack}
 									<button
 										type="button"
-										onclick={() => openGitModal(source.gitStack)}
+										onclick={(e) => { e.stopPropagation(); openGitModal(source.gitStack); }}
 										title="Edit git stack"
 										class="p-1 rounded hover:bg-muted transition-colors opacity-70 hover:opacity-100 cursor-pointer"
 									>
@@ -1763,7 +1768,7 @@
 									<!-- Internal stacks (including those needing file location) -->
 									<button
 										type="button"
-										onclick={() => editStack(stack.name)}
+										onclick={(e) => { e.stopPropagation(); editStack(stack.name); }}
 										title="Edit"
 										class="p-1 rounded hover:bg-muted transition-colors opacity-70 hover:opacity-100 cursor-pointer"
 									>
@@ -1774,7 +1779,7 @@
 							{#if stack.containers && stack.containers.length > 0}
 								<button
 									type="button"
-									onclick={() => viewStackLogs(stack)}
+									onclick={(e) => { e.stopPropagation(); viewStackLogs(stack); }}
 									title="View logs"
 									class="p-1 rounded hover:bg-muted transition-colors opacity-70 hover:opacity-100 cursor-pointer"
 								>
@@ -1852,7 +1857,7 @@
 								{#if $canAccess('stacks', 'start')}
 									<button
 										type="button"
-										onclick={() => startStack(stack.name)}
+										onclick={(e) => { e.stopPropagation(); startStack(stack.name); }}
 										title="Start"
 										class="p-1 rounded hover:bg-muted transition-colors opacity-70 hover:opacity-100 cursor-pointer"
 									>
@@ -1884,8 +1889,14 @@
 								itemName={stack.name}
 								title="Remove"
 								onConfirm={() => removeStack(stack.name)}
-								onOpenChange={(open) => confirmDeleteName = open ? stack.name : null}
+								onOpenChange={(open) => { confirmDeleteName = open ? stack.name : null; if (!open) deleteVolumes = false; }}
 							>
+								{#snippet extraContent()}
+									<label class="flex items-center gap-1.5 cursor-pointer">
+										<Checkbox bind:checked={deleteVolumes} />
+										<span class="text-xs text-muted-foreground">Also delete volumes</span>
+									</label>
+								{/snippet}
 								{#snippet children({ open })}
 									<Trash2 class="w-3 h-3 {open ? 'text-destructive' : 'text-muted-foreground hover:text-destructive'}" />
 								{/snippet}
