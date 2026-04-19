@@ -291,7 +291,7 @@ async function sendTelegram(appriseUrl: string, payload: NotificationPayload): P
 	const escapedMessage = escapeTelegramMarkdown(payload.message);
 	const envTag = payload.environmentName ? ` \\[${escapeTelegramMarkdown(payload.environmentName)}\\]` : '';
 
-	const topicId = Number.parseInt(topicIdStr, 10)
+	const topicId = topicIdStr ? parseInt(topicIdStr, 10) : undefined;
 
 	try {
 		const response = await fetch(url, {
@@ -300,7 +300,7 @@ async function sendTelegram(appriseUrl: string, payload: NotificationPayload): P
 			body: JSON.stringify({
 				chat_id: chatId,
 				text: `*${escapedTitle}*${envTag}\n${escapedMessage}`,
-				message_thread_id: Number.isNaN(topicId) ? undefined : topicId,
+				...(topicId ? { message_thread_id: topicId } : {}),
 				parse_mode: 'Markdown'
 			})
 		});
@@ -334,12 +334,14 @@ async function sendGotify(appriseUrl: string, payload: NotificationPayload): Pro
 	const token = lastSlash >= 0 ? pathPart.substring(lastSlash + 1) : pathPart;
 	const url = `${protocol}://${hostname}${subpath ? '/' + subpath : ''}/message?token=${token}`;
 
+	const titleWithEnv = payload.environmentName ? `${payload.title} [${payload.environmentName}]` : payload.title;
+
 	try {
 		const response = await fetch(url, {
 			method: 'POST',
 			headers: { 'Content-Type': 'application/json' },
 			body: JSON.stringify({
-				title: payload.title,
+				title: titleWithEnv,
 				message: payload.message,
 				priority: payload.type === 'error' ? 8 : payload.type === 'warning' ? 5 : 2
 			})
@@ -395,8 +397,9 @@ async function sendNtfy(appriseUrl: string, payload: NotificationPayload): Promi
 		url = `https://ntfy.sh/${path}`;
 	}
 
+	const titleWithEnv = payload.environmentName ? `${payload.title} [${payload.environmentName}]` : payload.title;
 	const headers: Record<string, string> = {
-		'Title': payload.title,
+		'Title': titleWithEnv,
 		'Priority': payload.type === 'error' ? '5' : payload.type === 'warning' ? '4' : '3',
 		'Tags': payload.type || 'info'
 	};
@@ -433,6 +436,7 @@ async function sendPushover(appriseUrl: string, payload: NotificationPayload): P
 
 	const [, userKey, apiToken] = match;
 	const url = 'https://api.pushover.net/1/messages.json';
+	const titleWithEnv = payload.environmentName ? `${payload.title} [${payload.environmentName}]` : payload.title;
 
 	try {
 		const response = await fetch(url, {
@@ -441,7 +445,7 @@ async function sendPushover(appriseUrl: string, payload: NotificationPayload): P
 			body: JSON.stringify({
 				token: apiToken,
 				user: userKey,
-				title: payload.title,
+				title: titleWithEnv,
 				message: payload.message,
 				priority: payload.type === 'error' ? 1 : 0
 			})
@@ -471,6 +475,7 @@ async function sendGenericWebhook(appriseUrl: string, payload: NotificationPaylo
 				title: payload.title,
 				message: payload.message,
 				type: payload.type || 'info',
+				environment: payload.environmentName || null,
 				timestamp: new Date().toISOString()
 			})
 		});
